@@ -72,13 +72,12 @@ function Get-SystemContext {
 
 function Get-CharmServices {
     $services = @{
-        #TODO: proper cinder service !!!
-        'cinder' = @{
-            'description'  = "OpenStack Cinder Service";
-            'binary' = Join-Path $PYTHON_DIR "Scripts\nova-compute.exe";
-            'config' = Join-Path $CONFIG_DIR "nova.conf";
-            'template' = Join-Path (Get-TemplatesDir) "nova.conf";
-            'service_name' = 'nova-compute';
+        'cinder-volume' = @{
+            'description'  = "OpenStack Cinder Volume Service";
+            'binary' = Join-Path $PYTHON_DIR "Scripts\cinder-volume.exe";
+            'config' = Join-Path $CONFIG_DIR "cinder.conf";
+            'template' = Join-Path (Get-TemplatesDir) "cinder.conf";
+            'service_name' = 'cinder-volume';
             "context_generators" = @(
                 @{
                     "generator" = "Get-DevStackContext";
@@ -1380,7 +1379,7 @@ function Start-RelationHooks {
                                  $charmServices[$key]['binary'] $charmServices[$key]['config'] `
                                  $adCtx['adcredentials'][0]['username'] `
                                  $adCtx['adcredentials'][0]['password']
-            Write-ConfigFile $key
+            #Write-ConfigFile $key
         }
         Set-JujuStatus -Status active -Message "Unit is ready"
     }
