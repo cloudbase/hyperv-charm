@@ -72,8 +72,9 @@ function Get-SystemContext {
 
 function Get-CharmServices {
     $services = @{
-        'nova' = @{
-            'description'  = "OpenStack nova Compute Service";
+        #TODO: proper cinder service !!!
+        'cinder' = @{
+            'description'  = "OpenStack Cinder Service";
             'binary' = Join-Path $PYTHON_DIR "Scripts\nova-compute.exe";
             'config' = Join-Path $CONFIG_DIR "nova.conf";
             'template' = Join-Path (Get-TemplatesDir) "nova.conf";
@@ -89,40 +90,6 @@ function Get-CharmServices {
                 }
             );
         };
-        'neutron' = @{
-            'description' = "OpenStack Neutron Hyper-V Agent Service";
-            'binary' = (Join-Path $PYTHON_DIR "Scripts\neutron-hyperv-agent.exe");
-            'config' = (Join-Path $CONFIG_DIR "neutron_hyperv_agent.conf");
-            'template' = Join-Path (Get-TemplatesDir) "neutron_hyperv_agent.conf";
-            'service_name' = "neutron-hyperv-agent";
-            "context_generators" = @(
-                @{
-                    "generator" = "Get-DevStackContext";
-                    "relation"  = "devstack";
-                },
-                @{
-                    "generator" = "Get-SystemContext";
-                    "relation"  = "system";
-                }
-            );
-        };
-        'neutron-ovs' = @{
-            'description' = "OpenStack Neutron Open vSwitch Agent Service";
-            'binary' = (Join-Path $PYTHON_DIR "Scripts\neutron-openvswitch-agent.exe");
-            'config' = (Join-Path $CONFIG_DIR "ml2_conf.ini");
-            'template' = Join-Path (Get-TemplatesDir) "ml2_conf.ini";
-            'service_name' = "neutron-openvswitch-agent";
-            "context_generators" = @(
-                @{
-                    "generator" = "Get-DevStackContext";
-                    "relation"  = "devstack";
-                },
-                @{
-                    "generator" = "Get-SystemContext";
-                    "relation"  = "system";
-                }
-            );
-        }
     }
     return $services
 }
@@ -1274,7 +1241,7 @@ function Start-InstallHook {
     $msiscsi_service.StartService()
 
     Import-CloudbaseCert
-    Start-ConfigureVMSwitch
+    #Start-ConfigureVMSwitch
     Write-PipConfigFile
 
     # Install Git
@@ -1377,14 +1344,14 @@ function Start-ADRelationJoinedHook {
 
 function Start-RelationHooks {
     $charmServices = Get-CharmServices
-    $networkType = Get-JujuCharmConfig -Scope 'network-type'
-    if ($networkType -eq "hyperv") {
-        $charmServices.Remove('neutron-ovs')
-    } elseif ($networkType -eq "ovs") {
-        $charmServices.Remove('neutron')
-    } else {
-        Throw "ERROR: Unknown network type: '$networkType'."
-    }
+    #$networkType = Get-JujuCharmConfig -Scope 'network-type'
+    #if ($networkType -eq "hyperv") {
+    #    $charmServices.Remove('neutron-ovs')
+    #} elseif ($networkType -eq "ovs") {
+    #    $charmServices.Remove('neutron')
+    #} else {
+    #    Throw "ERROR: Unknown network type: '$networkType'."
+    #}
 
     $adCtx = Get-ActiveDirectoryContext
     if (!$adCtx.Count) {
