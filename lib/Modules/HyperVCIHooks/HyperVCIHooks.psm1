@@ -1313,7 +1313,7 @@ function Start-InstallHook {
     Start-ExternalCommand { git config --global user.name $gitName } `
         -ErrorMessage "Failed to set git global user.name"
     $zuulBranch = Get-JujuCharmConfig -scope 'zuul-branch'
-
+    Start-ExternalCommand { Install-WindowsFeature FS-iSCSITarget-Service -ErrorAction SilentlyContinue } -ErrorMessage "Failed installing FS-iSCSITarget-Service"
     Write-JujuLog "Initializing the environment"
     Initialize-Environment
 }
@@ -1358,10 +1358,10 @@ function Start-RelationHooks {
     } else {
         Start-JoinDomain
 
-    Write-JujuLog "Enabling Live Migration"
-    Start-ExternalCommand { Enable-VMMigration } -ErrorMessage "Failed to enable live migation."
-    Start-ExternalCommand { Set-VMHost -useanynetworkformigration $true } -ErrorMessage "Failed setting using any network for migration"
-    Start-ExternalCommand { Set-VMHost -VirtualMachineMigrationAuthenticationType Kerberos -ErrorAction SilentlyContinue } -ErrorMessage "Failed setting VM migartion authentication type"
+    #Write-JujuLog "Enabling Live Migration"
+    #Start-ExternalCommand { Enable-VMMigration } -ErrorMessage "Failed to enable live migation."
+    #Start-ExternalCommand { Set-VMHost -useanynetworkformigration $true } -ErrorMessage "Failed setting using any network for migration"
+    #Start-ExternalCommand { Set-VMHost -VirtualMachineMigrationAuthenticationType Kerberos -ErrorAction SilentlyContinue } -ErrorMessage "Failed setting VM migartion authentication type"
 
         $adUserCred = @{
             'domain'   = $adCtx["domainName"];
