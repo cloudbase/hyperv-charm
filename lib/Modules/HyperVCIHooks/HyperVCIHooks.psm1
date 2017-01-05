@@ -835,6 +835,10 @@ function Initialize-Environment {
         Expand-ZipArchive $zipPath $BIN_DIR
     }
 
+    if (!(Get-WindowsFeature hyper-v).Installed) {
+        Install-WindowsFeature -Name Hyper-V -includemanagementtools
+    }
+   
     $networkType = Get-JujuCharmConfig -Scope 'network-type'
     Initialize-GitRepositories $networkType $BranchName $BuildFor
 
@@ -855,8 +859,8 @@ function Initialize-Environment {
     Start-ExternalCommand -ScriptBlock { pip install -U $os_win_git } `
                                     -ErrorMessage "Failed to install $os_win_git"
 
-    Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
-                                    -ErrorMessage "Failed to install $os_win_git"
+#    Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
+#                                    -ErrorMessage "Failed to install $os_win_git"
 
     Write-JujuLog "Environment initialization done."
 }
