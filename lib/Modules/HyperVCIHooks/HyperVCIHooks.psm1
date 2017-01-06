@@ -1259,7 +1259,10 @@ function Start-InstallHook {
         Write-JujuWarning "Failed to set power scheme."
     }
     Start-TimeResync
-
+    if (!(Get-WindowsFeature hyper-v).Installed) {
+        Install-WindowsFeature -Name Hyper-V -includemanagementtools
+        Invoke-JujuReboot -Now
+    }
     # Disable firewall
     Start-ExternalCommand { netsh.exe advfirewall set allprofiles state off } -ErrorMessage "Failed to disable firewall."
 
