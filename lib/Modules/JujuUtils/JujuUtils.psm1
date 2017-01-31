@@ -517,4 +517,29 @@ function Get-PSStringParamsFromHashtable {
     }
 }
 
+function Add-ToSystemPath {
+     <#
+     .SYNOPSIS
+     Permanently add an additional path to the system path.
+     .PARAMETER Path
+     Extra path to add to $env:PATH
+     #>
+     [CmdletBinding()]
+     Param(
+         [Parameter(Mandatory=$true)]
+         [string]$Path
+     )
+     PROCESS {
+         $currentPath = Get-SystemPath
+         if ($Path -in $currentPath.Split(';')){
+             return
+         }
+         $newPath = $currentPath + ";" + $Path
+         Start-ExternalCommand -Command {
+             setx /M PATH $newPath
+         } -ErrorMessage "Failed to set system path"
+         $env:PATH += ";$Path"
+     }
+ }
+
 Export-ModuleMember -Function * -Alias *
