@@ -373,8 +373,10 @@ function Start-GitClonePull {
             Start-ExternalCommand -ScriptBlock { git clone $URL $Path } `
                                   -ErrorMessage "Git clone failed"
         }
+        pushd $Path
         Start-ExternalCommand -ScriptBlock { git checkout $Branch } `
                               -ErrorMessage "Git checkout failed"
+        popd
     } else {
         pushd $Path
         try {
@@ -556,10 +558,11 @@ function Install-Nova {
 
     Write-JujuLog "Copying default config files"
     $defaultConfigFiles = @('rootwrap.d', 'api-paste.ini', 'cells.json',
-                            'policy.json','rootwrap.conf')
+                            'rootwrap.conf')
     foreach ($config in $defaultConfigFiles) {
         Copy-Item -Recurse -Force "$openstackBuild\nova\etc\nova\$config" $CONFIG_DIR
     }
+    Copy-Item -Force (Join-Path (Get-TemplatesDir) "policy.json") $CONFIG_DIR
     Copy-Item -Force (Join-Path (Get-TemplatesDir) "interfaces.template") $CONFIG_DIR
 }
 
@@ -691,8 +694,7 @@ function Set-HyperVMACS {
 
 
 function Enable-OVS {
-    $ovs_pip = "ovs==2.6.0.dev1"
-    Start-ExternalCommand { pip install -U $ovs_pip } -ErrorMessage "Failed to install $ovs_pip"
+    Start-ExternalCommand { pip install -U "ovs" } -ErrorMessage "Failed to install $ovs_pip"
     
     Start-ExternalCommand { cmd.exe /c "sc triggerinfo ovs-vswitchd start/strcustom/6066F867-7CA1-4418-85FD-36E3F9C0600C/VmmsWmiEventProvider" } -ErrorMessage "Failed to modify ovs-vswitchd service."
     Start-ExternalCommand { cmd.exe /c "sc config ovs-vswitchd start=demand" } -ErrorMessage "Failed to modify ovs-vswitchd service."
@@ -711,26 +713,17 @@ function Ensure-InternalOVSInterfaces {
     $ifIndex = Get-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex"
     $lip = Get-CharmState -Namespace "novahyperv" -Key "local_ip"
     $ifName = (Get-NetAdapter -ifindex $ifIndex).Name
-
-    $br_mac = "55-55-" + ((Get-NetAdapter -ifindex $ifIndex).MACAddress).split("-", 3)[2] 
+    $lip_mask = Get-CharmState -Namespace "novahyperv" -Key "local_ip_mask"
 
     Invoke-JujuCommand -Command @($ovs_vsctl, "--may-exist", "add-br", "juju-br")
-    Get-NetAdapter -name "juju-br" | Set-NetAdapter -MACAddress $br_mac -Confirm:$false
     Invoke-JujuCommand -Command @($ovs_vsctl, "--may-exist", "add-port", "juju-br", $ifName)
 
     Restart-Service "ovs-vswitchd"
     Enable-NetAdapter -Name "juju-br" -Confirm:$false
 
-    $count = 0
-    while ($count -lt 60) {
-        if ((get-netipaddress | ? interfacealias -eq "juju-br" | ? addressfamily -eq "ipv4").SuffixOrigin -eq "Dhcp") {
-            $lip = (get-netipaddress | ? interfacealias -eq "juju-br" | ? addressfamily -eq "ipv4").IPAddress
-            Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $lip
-            return
-        }
-        $count += 1
-        Start-Sleep -Seconds 1
-    }
+    New-NetIPAddress -interfacealias "juju-br" -AddressFamily "ipv4" -IPAddress $lip -PrefixLength $lip_mask
+    Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $lip
+    return
 }
  
 
@@ -841,7 +834,7 @@ function Initialize-Environment {
         $zipPath = Join-Path $FILES_DIR "openstack_bin.zip"
         Expand-ZipArchive $zipPath $BIN_DIR
     }
-
+  
     $networkType = Get-JujuCharmConfig -Scope 'network-type'
     Initialize-GitRepositories $networkType $BranchName $BuildFor
 
@@ -862,8 +855,8 @@ function Initialize-Environment {
     Start-ExternalCommand -ScriptBlock { pip install -U $os_win_git } `
                                     -ErrorMessage "Failed to install $os_win_git"
 
-    Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
-                                    -ErrorMessage "Failed to install $os_win_git"
+#    Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
+#                                    -ErrorMessage "Failed to install $os_win_git"
 
     Write-JujuLog "Environment initialization done."
 }
@@ -1030,6 +1023,7 @@ function Get-DataPortFromDataNetwork {
         $network = Get-NetworkAddress $i.IPv4Address $decimalMask
         Write-JujuInfo ("Network address for {0} is {1}" -f @($i.IPAddress, $network))
         if ($network -eq $netDetails[0]){
+            Set-CharmState -Namespace "novahyperv" -Key "local_ip_mask" -Value $i.PrefixLength
             Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $i.IPAddress
             Set-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex" -Value $i.IfIndex
             return Get-NetAdapter -ifindex $i.IfIndex
@@ -1078,6 +1072,7 @@ function Get-OVSDataPort {
         if(!$local_ip){
             Throw "failed to get fallback adapter IP address"
         }
+        Set-CharmState -Namespace "novahyperv" -Key "local_ip_mask" -Value $i.PrefixLength
         Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $local_ip[0]
         Set-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex" -Value $port.IfIndex
     }
@@ -1257,10 +1252,26 @@ function Start-InstallHook {
         # No need to error out the hook if this fails.
         Write-JujuWarning "Failed to set power scheme."
     }
+
     Start-TimeResync
+
+    if (!(Get-WindowsFeature hyper-v).Installed) {
+        Install-WindowsFeature -Name Hyper-V -includemanagementtools
+        Invoke-JujuReboot -Now
+    }
 
     # Disable firewall
     Start-ExternalCommand { netsh.exe advfirewall set allprofiles state off } -ErrorMessage "Failed to disable firewall."
+    # Disable automatic updates
+    Write-JujuLog "Disabling automatic updates"
+    $update_service = Get-WmiObject Win32_Service -Filter 'Name="wuauserv"'
+    $update_service.ChangeStartMode("Disabled")
+    $update_service.StopService()
+
+    Write-JujuLog "Enable and start MSiSCSI"
+    $msiscsi_service = Get-WmiObject Win32_Service -Filter 'Name="MSiSCSI"'
+    $msiscsi_service.ChangeStartMode("Automatic")
+    $msiscsi_service.StartService()
 
     Import-CloudbaseCert
     Start-ConfigureVMSwitch
@@ -1269,10 +1280,12 @@ function Start-InstallHook {
     # Install Git
     Install-Dependency 'git-url' @('/SILENT')
     Add-ToUserPath "${env:ProgramFiles(x86)}\Git\cmd"
+    Add-ToSystemPath "${env:ProgramFiles(x86)}\Git\cmd"
 
     # Install Python 2.7.x (x86)
     Install-Dependency 'python27-url' @('/qn')
     Add-ToUserPath "${env:SystemDrive}\Python27;${env:SystemDrive}\Python27\scripts"
+    Add-ToSystemPath "${env:SystemDrive}\Python27;${env:SystemDrive}\Python27\scripts"
 
     # Install FreeRDP Hyper-V console access
     $enableFreeRDP = Get-JujuCharmConfig -Scope 'enable-freerdp-console'
@@ -1340,8 +1353,10 @@ function Start-ADRelationJoinedHook {
     $hypervADUser = Get-HypervADUser
     $userGroup = @{$hypervADUser = @("CN=Users")}
     $encUserGroup = Get-MarshaledObject $userGroup
+    $constraintsList = @("Microsoft Virtual System Migration Service", "cifs")
     $relationParams = @{
-        'computername' = [System.Net.Dns]::GetHostName();
+        'computername' = [System.Net.Dns]::GetHostName()
+        'constraints' = Get-MarshaledObject $constraintsList
         'adusers' = $encUserGroup
     }
 
@@ -1372,6 +1387,16 @@ function Start-RelationHooks {
         Write-JujuLog "AD context is not ready."
     } else {
         Start-JoinDomain
+
+        try {
+            # Enable Live Migration
+            Start-ExternalCommand { Enable-VMMigration } -ErrorMessage "Failed to enable live migation." -ErrorAction silentlycontinue
+            Start-ExternalCommand { Set-VMHost -useanynetworkformigration $true } -ErrorMessage "Failed setting using any network for migration" -ErrorAction silentlycontinue
+            Start-ExternalCommand { Set-VMHost -VirtualMachineMigrationAuthenticationType Kerberos } -ErrorMessage "Failed setting VM migartion authentication type" -ErrorAction silentlycontinue
+        } Catch {
+            # TODO: better handling maybe move this to start-joindomain function
+            Write-JujuLog "Failed configuring migration, might be already set from a previous run"
+        }     
 
         $adUserCred = @{
             'domain'   = $adCtx["domainName"];

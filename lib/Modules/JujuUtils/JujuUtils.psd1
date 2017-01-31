@@ -69,6 +69,7 @@ FunctionsToExport = @(
     "Get-UnmarshaledObject",
     "Get-CmdStringFromHashtable",
     "Get-EscapedQuotedString",
+    "Add-ToSystemPath",
     "Get-PSStringParamsFromHashtable")
 
 # Cmdlets to export from this module
