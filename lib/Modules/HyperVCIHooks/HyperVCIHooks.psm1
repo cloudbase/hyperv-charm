@@ -72,12 +72,12 @@ function Get-SystemContext {
 
 function Get-CharmServices {
     $services = @{
-        'nova' = @{
-            'description'  = "OpenStack nova Compute Service";
-            'binary' = Join-Path $PYTHON_DIR "Scripts\nova-compute.exe";
-            'config' = Join-Path $CONFIG_DIR "nova.conf";
-            'template' = Join-Path (Get-TemplatesDir) "nova.conf";
-            'service_name' = 'nova-compute';
+        'cinder-volume' = @{
+            'description'  = "OpenStack Cinder Volume Service";
+            'binary' = Join-Path $PYTHON_DIR "Scripts\cinder-volume.exe";
+            'config' = Join-Path $CONFIG_DIR "cinder.conf";
+            'template' = Join-Path (Get-TemplatesDir) "cinder.conf";
+            'service_name' = 'cinder-volume';
             "context_generators" = @(
                 @{
                     "generator" = "Get-DevStackContext";
@@ -89,40 +89,6 @@ function Get-CharmServices {
                 }
             );
         };
-        'neutron' = @{
-            'description' = "OpenStack Neutron Hyper-V Agent Service";
-            'binary' = (Join-Path $PYTHON_DIR "Scripts\neutron-hyperv-agent.exe");
-            'config' = (Join-Path $CONFIG_DIR "neutron_hyperv_agent.conf");
-            'template' = Join-Path (Get-TemplatesDir) "neutron_hyperv_agent.conf";
-            'service_name' = "neutron-hyperv-agent";
-            "context_generators" = @(
-                @{
-                    "generator" = "Get-DevStackContext";
-                    "relation"  = "devstack";
-                },
-                @{
-                    "generator" = "Get-SystemContext";
-                    "relation"  = "system";
-                }
-            );
-        };
-        'neutron-ovs' = @{
-            'description' = "OpenStack Neutron Open vSwitch Agent Service";
-            'binary' = (Join-Path $PYTHON_DIR "Scripts\neutron-openvswitch-agent.exe");
-            'config' = (Join-Path $CONFIG_DIR "ml2_conf.ini");
-            'template' = Join-Path (Get-TemplatesDir) "ml2_conf.ini";
-            'service_name' = "neutron-openvswitch-agent";
-            "context_generators" = @(
-                @{
-                    "generator" = "Get-DevStackContext";
-                    "relation"  = "devstack";
-                },
-                @{
-                    "generator" = "Get-SystemContext";
-                    "relation"  = "system";
-                }
-            );
-        }
     }
     return $services
 }
@@ -842,28 +808,28 @@ function Initialize-Environment {
         Expand-ZipArchive $zipPath $BIN_DIR
     }
 
-    $networkType = Get-JujuCharmConfig -Scope 'network-type'
-    Initialize-GitRepositories $networkType $BranchName $BuildFor
+    #$networkType = Get-JujuCharmConfig -Scope 'network-type'
+    #Initialize-GitRepositories $networkType $BranchName $BuildFor
 
-    Install-Nova
-    Install-ComputeHyperV
-    Install-Neutron
-    if ($networkType -eq 'hyperv') {
-        Install-NetworkingHyperV
-    } elseif ($networkType -eq 'ovs') {
-        Check-OVSPrerequisites
-        Enable-OVS
-        Ensure-InternalOVSInterfaces
-    } else {
-        Throw "Wrong network type config: '$networkType'"
-    }
+    #Install-Nova
+    #Install-ComputeHyperV
+    #Install-Neutron
+    #if ($networkType -eq 'hyperv') {
+    #    Install-NetworkingHyperV
+    #} elseif ($networkType -eq 'ovs') {
+    #    Check-OVSPrerequisites
+    #    Enable-OVS
+    #    Ensure-InternalOVSInterfaces
+    #} else {
+    #    Throw "Wrong network type config: '$networkType'"
+    #}
 
-    $os_win_git = "git+https://git.openstack.org/openstack/os-win.git"
-    Start-ExternalCommand -ScriptBlock { pip install -U $os_win_git } `
-                                    -ErrorMessage "Failed to install $os_win_git"
+    #$os_win_git = "git+https://git.openstack.org/openstack/os-win.git"
+    #Start-ExternalCommand -ScriptBlock { pip install -U $os_win_git } `
+    #                                -ErrorMessage "Failed to install $os_win_git"
 
-    Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
-                                    -ErrorMessage "Failed to install $os_win_git"
+    #Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
+    #                                -ErrorMessage "Failed to install $os_win_git"
 
     Write-JujuLog "Environment initialization done."
 }
@@ -1131,6 +1097,7 @@ function Start-ConfigureVMSwitch {
 
     Write-JujuInfo "Adding new vmswitch: $VMswitchName"
     New-VMSwitch -Name $VMswitchName -NetAdapterName $dataPort.Name -AllowManagementOS $managementOS
+
     return $true
 }
 
@@ -1262,17 +1229,33 @@ function Start-InstallHook {
     # Disable firewall
     Start-ExternalCommand { netsh.exe advfirewall set allprofiles state off } -ErrorMessage "Failed to disable firewall."
 
+    Write-JujuLog "Disabling automatic updates"
+    $updates_service = Get-WmiObject Win32_Service -Filter 'Name="wuauserv"'
+    $updates_service.ChangeStartMode("Disabled")
+    $updates_service.StopService()
+
+    Write-JujuLog "Enable and start MSiSCSI"
+    $msiscsi_service = Get-WmiObject Win32_Service -Filter 'Name="MSiSCSI"'
+    $msiscsi_service.ChangeStartMode("Automatic")
+    $msiscsi_service.StartService()
+
     Import-CloudbaseCert
-    Start-ConfigureVMSwitch
+    #Start-ConfigureVMSwitch
     Write-PipConfigFile
 
     # Install Git
     Install-Dependency 'git-url' @('/SILENT')
     Add-ToUserPath "${env:ProgramFiles(x86)}\Git\cmd"
+    Add-ToSystemPath "${env:ProgramFiles(x86)}\Git\cmd"
+    Add-ToSystemPath "${env:ProgramFiles(x86)}\Git\bin"
 
     # Install Python 2.7.x (x86)
     Install-Dependency 'python27-url' @('/qn')
     Add-ToUserPath "${env:SystemDrive}\Python27;${env:SystemDrive}\Python27\scripts"
+    Add-ToSystemPath "${env:SystemDrive}\Python27;${env:SystemDrive}\Python27\scripts"
+
+    # Install Windows OpenSSL
+    Install-Dependency 'openssl-url' @('/verysilent')
 
     # Install FreeRDP Hyper-V console access
     $enableFreeRDP = Get-JujuCharmConfig -Scope 'enable-freerdp-console'
@@ -1314,14 +1297,14 @@ function Start-InstallHook {
         python "$PYTHON_DIR\Scripts\pywin32_postinstall.py" -install
     } -ErrorMessage "Failed to run pywin32_postinstall.py"
 
-    Write-JujuLog "Running Git Prep"
-    $zuulUrl = Get-JujuCharmConfig -Scope 'zuul-url'
-    $zuulRef = Get-JujuCharmConfig -Scope 'zuul-ref'
-    $zuulChange = Get-JujuCharmConfig -Scope 'zuul-change'
-    $zuulProject = Get-JujuCharmConfig -Scope 'zuul-project'
-    $gerritSite = $zuulUrl.Trim('/p')
-    Start-GerritGitPrep -ZuulUrl $zuulUrl -GerritSite $gerritSite -ZuulRef $zuulRef `
-                        -ZuulChange $zuulChange -ZuulProject $zuulProject
+    #Write-JujuLog "Running Git Prep"
+    #$zuulUrl = Get-JujuCharmConfig -Scope 'zuul-url'
+    #$zuulRef = Get-JujuCharmConfig -Scope 'zuul-ref'
+    #$zuulChange = Get-JujuCharmConfig -Scope 'zuul-change'
+    #$zuulProject = Get-JujuCharmConfig -Scope 'zuul-project'
+    #$gerritSite = $zuulUrl.Trim('/p')
+    #Start-GerritGitPrep -ZuulUrl $zuulUrl -GerritSite $gerritSite -ZuulRef $zuulRef `
+    #                    -ZuulChange $zuulChange -ZuulProject $zuulProject
 
     $gitEmail = Get-JujuCharmConfig -scope 'git-user-email'
     $gitName = Get-JujuCharmConfig -scope 'git-user-name'
@@ -1330,9 +1313,9 @@ function Start-InstallHook {
     Start-ExternalCommand { git config --global user.name $gitName } `
         -ErrorMessage "Failed to set git global user.name"
     $zuulBranch = Get-JujuCharmConfig -scope 'zuul-branch'
-
+    Start-ExternalCommand { Install-WindowsFeature FS-iSCSITarget-Service -ErrorAction SilentlyContinue } -ErrorMessage "Failed installing FS-iSCSITarget-Service"
     Write-JujuLog "Initializing the environment"
-    Initialize-Environment -BranchName $zuulBranch -BuildFor $zuulProject
+    Initialize-Environment
 }
 
 
@@ -1340,8 +1323,10 @@ function Start-ADRelationJoinedHook {
     $hypervADUser = Get-HypervADUser
     $userGroup = @{$hypervADUser = @("CN=Users")}
     $encUserGroup = Get-MarshaledObject $userGroup
+    $constraintsList = @("Microsoft Virtual System Migration Service", "cifs")
     $relationParams = @{
-        'computername' = [System.Net.Dns]::GetHostName();
+        'computername' = [System.Net.Dns]::GetHostName()
+        'constraints' = Get-MarshaledObject $constraintsList
         'adusers' = $encUserGroup
     }
 
@@ -1358,14 +1343,14 @@ function Start-ADRelationJoinedHook {
 
 function Start-RelationHooks {
     $charmServices = Get-CharmServices
-    $networkType = Get-JujuCharmConfig -Scope 'network-type'
-    if ($networkType -eq "hyperv") {
-        $charmServices.Remove('neutron-ovs')
-    } elseif ($networkType -eq "ovs") {
-        $charmServices.Remove('neutron')
-    } else {
-        Throw "ERROR: Unknown network type: '$networkType'."
-    }
+    #$networkType = Get-JujuCharmConfig -Scope 'network-type'
+    #if ($networkType -eq "hyperv") {
+    #    $charmServices.Remove('neutron-ovs')
+    #} elseif ($networkType -eq "ovs") {
+    #    $charmServices.Remove('neutron')
+    #} else {
+    #    Throw "ERROR: Unknown network type: '$networkType'."
+    #}
 
     $adCtx = Get-ActiveDirectoryContext
     if (!$adCtx.Count) {
@@ -1373,13 +1358,18 @@ function Start-RelationHooks {
     } else {
         Start-JoinDomain
 
+    #Write-JujuLog "Enabling Live Migration"
+    #Start-ExternalCommand { Enable-VMMigration } -ErrorMessage "Failed to enable live migation."
+    #Start-ExternalCommand { Set-VMHost -useanynetworkformigration $true } -ErrorMessage "Failed setting using any network for migration"
+    #Start-ExternalCommand { Set-VMHost -VirtualMachineMigrationAuthenticationType Kerberos -ErrorAction SilentlyContinue } -ErrorMessage "Failed setting VM migartion authentication type"
+
         $adUserCred = @{
             'domain'   = $adCtx["domainName"];
             'username' = $adCtx['adcredentials'][0]['username'];
             'password' = $adCtx['adcredentials'][0]['password']
         }
-        $relationParams = @{'ad_credentials' = (Get-MarshaledObject $adUserCred);}
-        Set-DevStackRelationParams $relationParams
+        #$relationParams = @{'ad_credentials' = (Get-MarshaledObject $adUserCred);}
+        #Set-DevStackRelationParams $relationParams
 
         # Add AD user to local Administrators group
         Grant-PrivilegesOnDomainUser $adCtx['adcredentials'][0]['username']
@@ -1389,25 +1379,25 @@ function Start-RelationHooks {
                                  $charmServices[$key]['binary'] $charmServices[$key]['config'] `
                                  $adCtx['adcredentials'][0]['username'] `
                                  $adCtx['adcredentials'][0]['password']
-            Write-ConfigFile $key
-        }
-    }
-
-    $devstackCtx = Get-DevStackContext
-    if (!$devstackCtx.Count -or !$adCtx.Count) {
-        Write-JujuLog ("Both AD context and DevStack context must be complete " +
-                       "before starting the OpenStack services.")
-    } else {
-        Start-Service "MSiSCSI"
-        Write-JujuLog "Starting OpenStack services"
-        $pollingInterval = 60
-        foreach($key in $charmServices.Keys) {
-            $serviceName = $charmServices[$key]['service_name']
-            Write-JujuLog "Starting $serviceName service"
-            Start-Service -ServiceName $serviceName
-            Write-JujuLog "Polling $serviceName service status for $pollingInterval seconds."
-            Watch-ServiceStatus $serviceName -IntervalSeconds $pollingInterval
+            #Write-ConfigFile $key
         }
         Set-JujuStatus -Status active -Message "Unit is ready"
     }
+
+    #$devstackCtx = Get-DevStackContext
+    #if (!$devstackCtx.Count -or !$adCtx.Count) {
+    #    Write-JujuLog ("Both AD context and DevStack context must be complete " +
+    #                   "before starting the OpenStack services.")
+    #} else {
+    #    Start-Service "MSiSCSI"
+    #    Write-JujuLog "Starting OpenStack services"
+    #    $pollingInterval = 60
+    #    foreach($key in $charmServices.Keys) {
+    #        $serviceName = $charmServices[$key]['service_name']
+    #        Write-JujuLog "Starting $serviceName service"
+    #        Start-Service -ServiceName $serviceName
+    #        Write-JujuLog "Polling $serviceName service status for $pollingInterval seconds."
+    #        Watch-ServiceStatus $serviceName -IntervalSeconds $pollingInterval
+    #    }
+    #}
 }
