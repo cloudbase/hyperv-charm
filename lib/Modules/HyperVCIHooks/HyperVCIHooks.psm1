@@ -15,6 +15,7 @@ $NEUTRON_GIT           = "https://github.com/openstack/neutron.git"
 $NOVA_GIT              = "https://github.com/openstack/nova.git"
 $NETWORKING_HYPERV_GIT = "https://github.com/openstack/networking-hyperv.git"
 $COMPUTE_HYPERV_GIT    = "https://github.com/openstack/compute-hyperv.git"
+$OSWIN_GIT             = "https://git.openstack.org/openstack/os-win.git"
 
 $OPENSTACK_DIR  = Join-Path $env:SystemDrive "OpenStack"
 $PYTHON_DIR     = Join-Path $env:SystemDrive "Python27"
@@ -61,6 +62,7 @@ function Get-SystemContext {
         "mkisofs_exe"         = Join-Path $BIN_DIR "mkisofs.exe";
         "log_directory"       = $LOG_DIR;
         "qemu_img_exe"        = Join-Path $BIN_DIR "qemu-img.exe";
+        "compute_driver"      = Get-ComputeDriver
         "vswitch_name"        = Get-JujuVMSwitchName
         "local_ip"            = (Get-CharmState -Namespace "novahyperv" -Key "local_ip");
         "etc_directory"       = $CONFIG_DIR;
@@ -544,59 +546,83 @@ function Start-GerritGitPrep {
 }
 
 
-function Install-Nova {
-    Write-JujuLog "Installing nova"
-
+function Install-Projects ($buildFor) {
+    # Shared for all projects
+    $projectDir = $buildFor -replace 'openstack/'
+    Write-JujuLog "Installing $projectDir"
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
     Start-ExecuteWithRetry {
-        Install-OpenStackProjectFromRepo "$openstackBuild\nova"
+        Install-OpenStackProjectFromRepo "$openstackBuild\$projectDir"
     }
-    $novaBin = (Get-CharmServices)['nova']['binary']
-    if (!(Test-Path $novaBin)) {
-        Throw "$novaBin was not found."
+    
+    # Individual projects
+    # Nova
+    if ($buildFor -eq "openstack/nova") {
+        $novaBin = (Get-CharmServices)['nova']['binary']
+        if (!(Test-Path $novaBin)) {
+            Throw "$novaBin was not found."
+        }
+
+        Write-JujuLog "Copying default config files"
+        $defaultConfigFiles = @('rootwrap.d', 'api-paste.ini', 'cells.json',
+                                'rootwrap.conf')
+        foreach ($config in $defaultConfigFiles) {
+            Copy-Item -Recurse -Force "$openstackBuild\nova\etc\nova\$config" $CONFIG_DIR
+        }
+        Copy-Item -Force (Join-Path (Get-TemplatesDir) "policy.json") $CONFIG_DIR
+        Copy-Item -Force (Join-Path (Get-TemplatesDir) "interfaces.template") $CONFIG_DIR
     }
-
-    Write-JujuLog "Copying default config files"
-    $defaultConfigFiles = @('rootwrap.d', 'api-paste.ini', 'cells.json',
-                            'rootwrap.conf')
-    foreach ($config in $defaultConfigFiles) {
-        Copy-Item -Recurse -Force "$openstackBuild\nova\etc\nova\$config" $CONFIG_DIR
-    }
-    Copy-Item -Force (Join-Path (Get-TemplatesDir) "policy.json") $CONFIG_DIR
-    Copy-Item -Force (Join-Path (Get-TemplatesDir) "interfaces.template") $CONFIG_DIR
-}
-
-function Install-ComputeHyperV {
-    Write-JujuLog "Installing compute-hyperv"
-
-    $openstackBuild = Join-Path $BUILD_DIR "openstack"
-    Start-ExecuteWithRetry {
-        Install-OpenStackProjectFromRepo "$openstackBuild\compute-hyperv"
-    }
-}
-
-function Install-Neutron {
-    Write-JujuLog "Installing neutron"
-
-    $openstackBuild = Join-Path $BUILD_DIR "openstack"
-    Start-ExecuteWithRetry {
-        Install-OpenStackProjectFromRepo "$openstackBuild\neutron"
+    # Networking-Hyperv
+    if ($buildFor -eq "openstack/networking-hyperv") {
+        $neutronBin = (Get-CharmServices)['neutron']['binary']
+        if (!(Test-Path $neutronBin)) {
+            Throw "$neutronBin was not found."
+        }
     }
 }
 
-
-function Install-NetworkingHyperV {
-    Write-JujuLog "Installing networking-hyperv"
-
-    $openstackBuild = Join-Path $BUILD_DIR "openstack"
-    Start-ExecuteWithRetry {
-        Install-OpenStackProjectFromRepo "$openstackBuild\networking-hyperv"
+function Get-ComputeDriver {
+    if ($buildFor -eq "openstack/compute-hyperv") {
+        $compute_driver = "hyperv.nova.driver.HyperVDriver"
     }
-    $neutronBin = (Get-CharmServices)['neutron']['binary']
-    if (!(Test-Path $neutronBin)) {
-        Throw "$neutronBin was not found."
+    else {
+        $compute_driver = "hyperv.driver.HyperVDriver"
+    }
+    return $compute_driver
+}
+
+function Install-NetworkType {
+    $buildFor = Get-JujuCharmConfig -Scope 'zuul-project'
+    $networkType = Get-JujuCharmConfig -Scope 'network-type'
+    if (($networkType -eq 'ovs') -and ($buildFor -eq 'openstack/networking-hyperv')) {
+        Throw "'$networkType' cannot be used when building for '$buildFor'"
+    }
+    if ($networkType -eq 'hyperv') {
+#        Install-NetworkingHyperV
+        Install-Projects "openstack/networking-hyperv"
+    }
+    elseif ($networkType -eq 'ovs') {
+        Check-OVSPrerequisites
+        Enable-OVS
+        Ensure-InternalOVSInterfaces
+    }
+    else {
+        Throw "Wrong network type config: '$networkType'"
     }
 }
+
+#function Install-NetworkingHyperV {
+#    Write-JujuLog "Installing networking-hyperv"
+#
+#    $openstackBuild = Join-Path $BUILD_DIR "openstack"
+#    Start-ExecuteWithRetry {
+#        Install-OpenStackProjectFromRepo "$openstackBuild\networking-hyperv"
+#    }
+#    $neutronBin = (Get-CharmServices)['neutron']['binary']
+#    if (!(Test-Path $neutronBin)) {
+#        Throw "$neutronBin was not found."
+#    }
+#}
 
 
 function Install-OVS {
@@ -736,10 +762,11 @@ function Get-CherryPicksObject {
         'nova' = @();
         'networking-hyperv' = @();
         'compute-hyperv' = @();
-        'neutron' = @()
+        'neutron' = @();
+        'os-win' = @()
     }
     $splitCfgOption = $cfgOption.Split(',')
-    $validProjects = @('nova', 'networking-hyperv', 'neutron', 'compute-hyperv')
+    $validProjects = @('nova', 'networking-hyperv', 'neutron', 'compute-hyperv', 'os-win')
     foreach ($item in $splitCfgOption) {
         $splitItem = $item.Split('|')
         if ($splitItem.Count -ne 4) {
@@ -785,38 +812,47 @@ function Initialize-GitRepositories {
         [ValidateSet("hyperv", "ovs")]
         [string]$NetworkType,
         [string]$BranchName,
-        [ValidateSet("openstack/nova", "openstack/neutron", "openstack/networking-hyperv", "openstack/quantum", "openstack/compute-hyperv")]
         [string]$BuildFor
     )
 
     Write-JujuLog "Cloning the required Git repositories"
-
+    
+    $standardProjects = 'openstack/nova', 'openstack/neutron', 'openstack/os-win'
     $cherryPicks = Get-CherryPicksObject
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
     if ($NetworkType -eq 'hyperv') {
-        if ($BuildFor -eq "openstack/networking-hyperv") {
-            Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
-            Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
-        } else {
+        if ($BuildFor -ne "openstack/networking-hyperv") {
             Initialize-GitRepository "$openstackBuild\networking-hyperv" $NETWORKING_HYPERV_GIT "master" $cherryPicks['networking-hyperv']
         }
     }
 
     if ($BuildFor -eq "openstack/nova") {
         Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
+        Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
     }
 
-    if (($BuildFor -eq "openstack/neutron") -or ($BuildFor -eq "openstack/quantum")) {
+    if ($BuildFor -eq "openstack/neutron") {
         Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
+        Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
     }
-    Initialize-GitRepository "$openstackBuild\compute-hyperv" $COMPUTE_HYPERV_GIT $BranchName $cherryPicks['compute-hyperv']
+    
+    if ($BuildFor -eq "openstack/os-win") {
+        Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
+        Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
+    }
+    
+    if ($BuildFor -notin $standardProjects) {
+        Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
+        Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
+        Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
+    }
 }
 
 
 function Initialize-Environment {
     Param(
         [string]$BranchName='master',
-        [string]$BuildFor='openstack/nova'
+        [string]$BuildFor
     )
 
     $dirs = @($CONFIG_DIR, $BIN_DIR, $INSTANCES_DIR, $LOG_DIR, $SERVICE_DIR)
@@ -838,29 +874,30 @@ function Initialize-Environment {
     $networkType = Get-JujuCharmConfig -Scope 'network-type'
     Initialize-GitRepositories $networkType $BranchName $BuildFor
 
-    Install-Nova
-    Install-ComputeHyperV
-    Install-Neutron
-    if ($networkType -eq 'hyperv') {
-        Install-NetworkingHyperV
-    } elseif ($networkType -eq 'ovs') {
-        Check-OVSPrerequisites
-        Enable-OVS
-        Ensure-InternalOVSInterfaces
-    } else {
-        Throw "Wrong network type config: '$networkType'"
+    $standardProjects = 'openstack/nova', 'openstack/neutron', 'openstack/os-win'
+    if ($buildFor -in $standardProjects) {
+        $defaultProjects = $standardProjects -notmatch $buildFor
+        foreach ($project in $defaultProjects) {
+            Install-Projects $project
+        }
+        Install-NetworkType
+        Install-Projects $buildFor
     }
-
-    $os_win_git = "git+https://git.openstack.org/openstack/os-win.git"
-    Start-ExternalCommand -ScriptBlock { pip install -U $os_win_git } `
-                                    -ErrorMessage "Failed to install $os_win_git"
-
-#    Start-ExternalCommand -ScriptBlock { pip install -U "amqp==1.4.9" } `
-#                                    -ErrorMessage "Failed to install $os_win_git"
+    else {
+        foreach ($project in $standardProjects) {
+            Install-Projects $project
+        }
+        if (($buildFor -eq "none") -or ($buildFor -eq "openstack/networking-hyperv")) {
+            Install-NetworkType
+        }
+        else {
+            Install-NetworkType
+            Install-Projects $buildFor
+        }
+    }
 
     Write-JujuLog "Environment initialization done."
 }
-
 
 function Set-ServiceAcountCredentials {
     Param(
@@ -1268,6 +1305,11 @@ function Start-InstallHook {
     $update_service.ChangeStartMode("Disabled")
     $update_service.StopService()
 
+    # Set Administrator user password
+    $admin_user = "Administrator"
+    $admin_password = Get-JujuCharmConfig -Scope 'administrator-password'
+    net user $admin_user "$admin_password"
+    
     Write-JujuLog "Enable and start MSiSCSI"
     $msiscsi_service = Get-WmiObject Win32_Service -Filter 'Name="MSiSCSI"'
     $msiscsi_service.ChangeStartMode("Automatic")
@@ -1326,16 +1368,22 @@ function Start-InstallHook {
     Start-ExternalCommand {
         python "$PYTHON_DIR\Scripts\pywin32_postinstall.py" -install
     } -ErrorMessage "Failed to run pywin32_postinstall.py"
-
-    Write-JujuLog "Running Git Prep"
+    
     $zuulUrl = Get-JujuCharmConfig -Scope 'zuul-url'
     $zuulRef = Get-JujuCharmConfig -Scope 'zuul-ref'
     $zuulChange = Get-JujuCharmConfig -Scope 'zuul-change'
     $zuulProject = Get-JujuCharmConfig -Scope 'zuul-project'
-    $gerritSite = $zuulUrl.Trim('/p')
-    Start-GerritGitPrep -ZuulUrl $zuulUrl -GerritSite $gerritSite -ZuulRef $zuulRef `
-                        -ZuulChange $zuulChange -ZuulProject $zuulProject
 
+    if (!$zuulProject) {
+        Write-JujuLog "zuulProject is empty. Setting it to 'none'. Not running Git Prep"
+        $zuulProject = "none"
+    }
+    else {
+        $gerritSite = $zuulUrl.Trim('/p')
+        Start-GerritGitPrep -ZuulUrl $zuulUrl -GerritSite $gerritSite -ZuulRef $zuulRef `
+                            -ZuulChange $zuulChange -ZuulProject $zuulProject
+    }
+    
     $gitEmail = Get-JujuCharmConfig -scope 'git-user-email'
     $gitName = Get-JujuCharmConfig -scope 'git-user-name'
     Start-ExternalCommand { git config --global user.email $gitEmail } `
@@ -1343,6 +1391,10 @@ function Start-InstallHook {
     Start-ExternalCommand { git config --global user.name $gitName } `
         -ErrorMessage "Failed to set git global user.name"
     $zuulBranch = Get-JujuCharmConfig -scope 'zuul-branch'
+    if (!$zuulBranch) {
+        Write-JujuLog "zuulBranch is empty. Setting branch to master"
+        $zuulBranch = "master"
+    }
 
     Write-JujuLog "Initializing the environment"
     Initialize-Environment -BranchName $zuulBranch -BuildFor $zuulProject

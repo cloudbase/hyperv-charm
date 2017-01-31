@@ -79,6 +79,13 @@ options:
     default: ""
     type: string
     description: "Extra python packages to install."
+  administrator-password:
+    default: "Passw0rd"
+    type: string
+    description: |
+      The password for the Administrator account. It must contain atleast
+      one upper case, one lower case and one number. The password must not
+      contain the user name string.
   ad-user-name:
     default: ""
     type: string
