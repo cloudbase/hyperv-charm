@@ -1,0 +1,146 @@
+options:
+  zuul-branch:
+    type: string
+    default: ""
+    description: "Zuul branch."
+  zuul-project:
+    type: string
+    default: ""
+    description: "Zuul project."
+  zuul-url:
+    type: string
+    default: ""
+    description: "Zuul URL."
+  zuul-ref:
+    type: string
+    default: ""
+    description: "Zuul ref."
+  zuul-change:
+    type: string
+    default: ""
+    description: "Zuul change."
+  cherry-picks:
+    type: string
+    description: |
+      A comma seperated list of items with git info used to apply cherry picks.
+      Each item has the following syntax: <project_name>|<git_url>|<branch_name>|<commit_id>
+      Valid project names are:
+        - nova
+        - networking-hyperv
+        - neutron
+  pypi-mirror:
+    type: string
+    default: ""
+    description: "Python Package Index mirror."
+  git-user-email:
+    type: string
+    default: "hyper-v_ci@microsoft.com"
+    description: "Value to pass to user.email git config."
+  git-user-name:
+    type: string
+    default: "Hyper-V CI"
+    description: "Value to pass to user.name git config."
+  vmswitch-name:
+    default: br100
+    type: string
+    description: Virtual switch to use
+  data-port:
+    type: string
+    default: ""
+    description: |
+      Ethernet interface to use for vmswitch. This can be a MAC address or an interface name.
+      This option is mandatory if more then one interface is present on the target system.
+      In cases where there is only one interface on the system, the vmswitch will be created using that
+      interface and OSManagement will be set to True, regardless of the vmswitch-management option.
+      Avoid using the management interface as a data interface where system has more then one NIC.
+  os-data-network:
+    type: string
+    description: |
+      The IP address and netmask of the OpenStack Data network (e.g.,
+      192.168.0.0/24) . This network will be used for tenant network traffic in
+      overlay networks.
+      NOTE: If ovs is selected as the network type, this option overrides
+      data-port. OVS on Windows requires that the os data network be set on the
+      vmswitch itself. That means that if an interface has an IP in the os-data-network
+      range, that interface will be added to the vmswitch. There is a caveat here.
+      If os-data-network is on a different interface then data-port, it might result
+      in the hyper-v compute nodes not being able to use VLAN network segregation.
+  ovs-installer-url:
+    type: string
+    default: "https://www.cloudbase.it/downloads/openvswitch-hyperv-installer-beta.msi"
+    description: |
+      Location of the OVS MSI installer
+  ovs-certificate-url:
+    type: string
+    description: |
+      Location of the self-signed OVS certificate. This is required if the install
+      package certificate is not officially signed. Test-signing must be set to true
+      for self-signed certificates.
+  test-signing:
+    default: False
+    type: boolean
+    description: |
+      Set this option to true if the ovs installer is not officially signed. This
+      is required if the installer has a self-signed certificate. Without this option
+      OVS driver will not install.
+  vmswitch-management:
+    default: False
+    type: boolean
+    description: |
+      Allow management OS on this vm switch. If True, the switch will be set in DHCP mode.
+  extra-python-packages:
+    default: ""
+    type: string
+    description: "Extra python packages to install."
+  administrator-password:
+    default: "Passw0rd"
+    type: string
+    description: |
+      The password for the Administrator account. It must contain atleast
+      one upper case, one lower case and one number. The password must not
+      contain the user name string.
+  ad-user-name:
+    default: ""
+    type: string
+    description: "User name of the AD user that will be used by this Hyper-V node."
+  network-type:
+    type: string
+    default: hyperv
+    description: |
+      Neutron agent to use. Valid options are:
+        * hyperv
+        * ovs
+  git-url:
+    type: string
+    default: "https://github.com/git-for-windows/git/releases/download/v2.7.2.windows.1/Git-2.7.2-32-bit.exe"
+    description: |
+      URL used to download git for Windows. Optionally, a checksum supported
+      by the 'Get-FileHash' PowerShell cmdlet can be provided to check file
+      integrity.
+      Syntax is: "<url>#<hash_algorithm><checksum>"
+  python27-url:
+    type: string
+    default: "https://www.python.org/ftp/python/2.7.10/python-2.7.10.msi"
+    description: |
+      URL used to download Python 2.7.x for Windows. Optionally, a checksum
+      supported by the 'Get-FileHash' PowerShell cmdlet can be provided to
+      check file integrity.
+      Syntax is: "<url>#<hash_algorithm><checksum>"
+  enable-freerdp-console:
+    type: boolean
+    default: True
+    description: |
+      Utility to connect to the console of a VM.
+  vc-2012-url:
+    type: string
+    default: "http://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x86.exe"
+    description: |
+      This is required only when config option 'enable-freerdp-console' is set to True.
+      URL used to download Visual C++ 2012 x86 runtime. Optionally, a checksum
+      supported by the 'Get-FileHash' PowerShell cmdlet can be provided to
+      check file integrity.
+      Syntax is: "<url>#<hash_algorithm><checksum>"
+  pip-version:
+    type: string
+    default: ""
+    description: "Which version of pip to install, example: pip==8.1.1"
