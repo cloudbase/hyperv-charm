@@ -70,6 +70,19 @@ options:
     default: "https://www.cloudbase.it/downloads/openvswitch-hyperv-installer-beta.msi"
     description: |
       Location of the OVS MSI installer
+  ovs-certificate-url:
+    type: string
+    description: |
+      Location of the self-signed OVS certificate. This is required if the install
+      package certificate is not officially signed. Test-signing must be set to true
+      for self-signed certificates.
+  test-signing:
+    default: False
+    type: boolean
+    description: |
+      Set this option to true if the ovs installer is not officially signed. This
+      is required if the installer has a self-signed certificate. Without this option
+      OVS driver will not install.
   vmswitch-management:
     default: False
     type: boolean
@@ -79,6 +92,13 @@ options:
     default: ""
     type: string
     description: "Extra python packages to install."
+  administrator-password:
+    default: "Passw0rd"
+    type: string
+    description: |
+      The password for the Administrator account. It must contain atleast
+      one upper case, one lower case and one number. The password must not
+      contain the user name string.
   ad-user-name:
     default: ""
     type: string
