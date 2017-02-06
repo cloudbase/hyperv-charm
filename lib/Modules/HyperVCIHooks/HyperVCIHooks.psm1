@@ -628,11 +628,9 @@ function Install-NetworkType {
 function Install-OVS {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$InstallerPath,
-        [string]$CertificatePath
+        [string]$InstallerPath
     )
 
-    $driverCertificate = Get-JujuCharmConfig -Scope "ovs-certificate-url"
     Write-JujuInfo "Running OVS install"
     $ovs = Get-ManagementObject -Class Win32_Product | Where-Object {$_.Name -match "open vswitch"}
     if ($ovs){
@@ -641,24 +639,32 @@ function Install-OVS {
     }
 
     $hasInstaller = Test-Path $InstallerPath
-    $hasCertificate = Test-Path $CertificatePath
     if($hasInstaller -eq $false){
         $InstallerPath = Get-OVSInstaller
     }
-    if ($driverCertificate) {
-        if ($hasCertificate -eq $false) {
-            $CertificatePath = Get-OVSCertificate
-        }
-        Write-JujuInfo "Importing certificate from $CertificatePath"
-        Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\Root
-        Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
-    }
+
     Write-JujuInfo "Installing from $InstallerPath"
     $ret = Start-Process -FilePath msiexec.exe -ArgumentList "INSTALLDIR=`"$OVS_DIR`"","/qb","/l*v","$env:APPDATA\ovs-log.txt","/i","$InstallerPath" -Wait -PassThru
     if($ret.ExitCode) {
         Throw "Failed to install OVS: $LASTEXITCODE"
     }
     Remove-Item $InstallerPath
+    return $true
+}
+
+
+function Import-OVSCertificate {
+	param(
+        [string]$CertificatePath
+    )
+	$hasCertificate = Test-Path $CertificatePath
+    if ($hasCertificate -eq $false) {
+        $CertificatePath = Get-OVSCertificate
+    }
+    Write-JujuInfo "Importing certificate from $CertificatePath"
+    Import-Certificate $CertificatePath -StoreLocation LocalMachine -StoreName TrustedPublisher
+    Import-Certificate $CertificatePath -StoreLocation LocalMachine -StoreName Root
+    Remove-Item $CertificatePath
     return $true
 }
 
@@ -682,9 +688,16 @@ function Check-OVSPrerequisites {
         $ovsdbSvc = Get-Service "ovsdb-server"
         $ovsSwitchSvc = Get-Service "ovs-vswitchd"
     } catch {
+        $driverCertificate = Get-JujuCharmConfig -Scope "ovs-certificate-url"
+        if ($driverCertificate) {
+            $CertificatePath = Get-OVSCertificate
+            Import-OVSCertificate $CertificatePath
+        }
+        else {
+            Write-JujuLog "No OVS driver certificate specified. Be sure to use an offically signed driver."
+        }
         $InstallerPath = Get-OVSInstaller
-        $CertificatePath = Get-OVSCertificate
-        Install-OVS $InstallerPath $CertificatePath
+        Install-OVS $InstallerPath
     }
     if(!(Test-Path $OVS_VSCTL)){
         Throw "Could not find ovs-vsctl.exe in location: $OVS_VSCTL"
