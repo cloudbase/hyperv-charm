@@ -628,9 +628,11 @@ function Install-NetworkType {
 function Install-OVS {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$InstallerPath
+        [string]$InstallerPath,
+        [string]$CertificatePath
     )
 
+    $driverCertificate = Get-JujuCharmConfig -Scope "ovs-certificate-url"
     Write-JujuInfo "Running OVS install"
     $ovs = Get-ManagementObject -Class Win32_Product | Where-Object {$_.Name -match "open vswitch"}
     if ($ovs){
@@ -639,8 +641,17 @@ function Install-OVS {
     }
 
     $hasInstaller = Test-Path $InstallerPath
+    $hasCertificate = Test-Path $CertificatePath
     if($hasInstaller -eq $false){
         $InstallerPath = Get-OVSInstaller
+    }
+    if ($driverCertificate) {
+        if ($hasCertificate -eq $false) {
+            $CertificatePath = Get-OVSCertificate
+        }
+        Write-JujuInfo "Importing certificate from $CertificatePath"
+        Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\Root
+        Import-Certificate -FilePath $CertificatePath -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
     }
     Write-JujuInfo "Installing from $InstallerPath"
     $ret = Start-Process -FilePath msiexec.exe -ArgumentList "INSTALLDIR=`"$OVS_DIR`"","/qb","/l*v","$env:APPDATA\ovs-log.txt","/i","$InstallerPath" -Wait -PassThru
@@ -659,6 +670,12 @@ function Get-OVSInstaller {
     return $location
 }
 
+function Get-OVSCertificate {
+    $urlChecksum = Get-URLChecksum "ovs-certificate-url"
+    $location = Get-PackagePath $urlChecksum['URL'] $urlChecksum['CHECKSUM'] `
+                                $urlChecksum['HASHING_ALGORITHM']
+    return $location
+}
 
 function Check-OVSPrerequisites {
     try {
@@ -666,7 +683,8 @@ function Check-OVSPrerequisites {
         $ovsSwitchSvc = Get-Service "ovs-vswitchd"
     } catch {
         $InstallerPath = Get-OVSInstaller
-        Install-OVS $InstallerPath
+        $CertificatePath = Get-OVSCertificate
+        Install-OVS $InstallerPath $CertificatePath
     }
     if(!(Test-Path $OVS_VSCTL)){
         Throw "Could not find ovs-vsctl.exe in location: $OVS_VSCTL"
@@ -800,9 +818,17 @@ function Initialize-GitRepository {
         Write-JujuLog ("Cherry-picking commit {0} from {1}, branch {2}" -f
                        @($commit['commit_id'], $commit['git_url'], $commit['branch_name']))
         pushd $BuildFolder
-        Start-ExternalCommand { git fetch $commit['git_url'] $commit['branch_name'] }
-        Start-ExternalCommand { git cherry-pick $commit['commit_id'] }
-        popd
+        $currentCommit = Start-ExternalCommand { git rev-parse HEAD }
+        $cherryCommit = $commit['commit_id']
+        if ($currentCommit -eq $cherryCommit) {
+            Write-JujuLog "Already in cherry-pick commit"
+            popd
+        }
+        else {
+            Start-ExternalCommand { git fetch $commit['git_url'] $commit['branch_name'] }
+            Start-ExternalCommand { git cherry-pick $commit['commit_id'] }
+            popd
+        }
     }
 }
 
@@ -1305,6 +1331,16 @@ function Start-InstallHook {
     $update_service.ChangeStartMode("Disabled")
     $update_service.StopService()
 
+    # Allow self-signed drivers installation
+    $bcdedit = "C:\bcdedit.txt"
+    $signingStatus = Get-JujuCharmConfig -Scope "test-signing"
+    if ((!(Test-Path -path $bcdedit)) -and ($signingStatus)){
+        bcdedit -set loadoptions DDISABLE_INTEGRITY_CHECKS
+        bcdedit -set TESTSIGNING ON
+        New-Item -ItemType file $bcdedit
+        Invoke-JujuReboot
+    }
+    
     # Set Administrator user password
     $admin_user = "Administrator"
     $admin_password = Get-JujuCharmConfig -Scope 'administrator-password'
