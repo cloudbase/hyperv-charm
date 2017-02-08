@@ -26,6 +26,43 @@ function Get-StateInformationRepository {
     }
 }
 
+
+function Get-JujuResource {
+    <#
+    .SYNOPSIS
+     Get-JujuResource downloads a resource. Return value is path on disk to the downloaded resource.
+    .PARAMETER Resource
+     The name of the resource you want to download.
+     .PARAMETER OutFile
+     Destination of the downloaded resource
+     .PARAMETER Force
+     Overwrite OutFile if it already exists
+    #>
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$Resource,
+        [Parameter(Mandatory=$false)]
+        [string]$OutFile,
+        [Parameter(Mandatory=$false)]
+        [bool]$Force=$false
+    )
+    PROCESS {
+        $cmd = @("resource-get.exe", $Resource)
+        $filePath = (Invoke-JujuCommand -Command $cmd)
+        if($OutFile) {
+            if((Test-Path $OutFile) -and !$Force) {
+                Throw "OutFile already exists"
+            }
+            rm $OutFile -Force -ErrorAction SilentlyContinue
+            Move-Item $filePath $OutFile -Force
+            $filePath = $OutFile
+        }
+        return $filePath
+    }
+}
+
+
 function Confirm-ContextComplete {
     <#
     .SYNOPSIS
@@ -142,11 +179,15 @@ function Get-JujuCharmConfig {
         [string]$Scope=$null
     )
     PROCESS {
-        $cmd = @("config-get.exe", "--format=yaml")
-        if ($Scope){
-            $cmd += $Scope
+        if(!$Global:CHARM_CFG) {
+            $cmd = @("config-get.exe", "--format=yaml")
+            $cfg = (Invoke-JujuCommand -Command $cmd) -Join "`r`n" | ConvertFrom-Yaml
+            Set-Variable -Name "CHARM_CFG" -Value $cfg -Scope Global -Option ReadOnly
         }
-        return ((Invoke-JujuCommand -Command $cmd) -Join "`r`n" | ConvertFrom-Yaml)
+        if ($Scope){
+            return $Global:CHARM_CFG[$Scope]
+        }
+        return $Global:CHARM_CFG
     }
 }
 
@@ -928,8 +969,7 @@ function Set-JujuStatus {
     <#
     .SYNOPSIS
     Set the status of a running unit, optionally allowing the charm author to also set
-    a message along with the status. It is recommended that the charm set its status and
-    a message when the charm transitions from one state to another.
+    a message along with the status.
     .PARAMETER Status
     One of the following statuses: maintenance, blocked, waiting, active
     .PARAMETER Message
@@ -965,9 +1005,7 @@ function Set-JujuStatus {
             $js = ConvertTo-Yaml $StatusData
             $cmd += $js
         }
-        if ((Get-JujuStatus) -ne $Status) {
-            Invoke-JujuCommand -Command $cmd | Out-Null
-        }
+        Invoke-JujuCommand -Command $cmd | Out-Null
     }
 }
 
@@ -1075,7 +1113,7 @@ function Set-CharmState {
     .PARAMETER Key
     A key to identify the information by
     .PARAMETER Value
-    The value we want to store. This must be a string.
+    The value we want to store.
     #>
     [CmdletBinding()]
     param(

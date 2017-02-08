@@ -10,6 +10,7 @@ Import-Module JujuLogging
 Import-Module JujuHelper
 Import-Module JujuWindowsUtils
 Import-Module ADCharmUtils
+Import-Module Templating
 
 $NEUTRON_GIT           = "https://github.com/openstack/neutron.git"
 $NOVA_GIT              = "https://github.com/openstack/nova.git"
@@ -31,6 +32,10 @@ $OVS_DIR        = "${env:ProgramFiles}\Cloudbase Solutions\Open vSwitch"
 $OVS_VSCTL      = Join-Path $OVS_DIR "bin\ovs-vsctl.exe"
 $env:OVS_RUNDIR = Join-Path $env:ProgramData "openvswitch"
 $OVS_EXT_NAME   = "Open vSwitch Extension"
+$INTERFACES_TEMPLATE = Join-Path $CONFIG_DIR "interfaces.template"
+$POLICY_FILE = Join-Path $CONFIG_DIR "policy.json"
+$MKISO_EXE = Join-Path $BIN_DIR "mkisofs.exe"
+$QEMU_IMG_EXE = Join-Path $BIN_DIR "qemu-img.exe"
 
 function Get-TemplatesDir {
     return (Join-Path (Get-JujuCharmDir) "templates")
@@ -56,12 +61,12 @@ function Get-DevStackContext {
 
 function Get-SystemContext {
     $systemCtxt = @{
-        "instances_path"      = Join-Path $OPENSTACK_DIR "Instances";
-        "interfaces_template" = Join-Path $CONFIG_DIR "interfaces.template";
-        "policy_file"         = Join-Path $CONFIG_DIR "policy.json";
-        "mkisofs_exe"         = Join-Path $BIN_DIR "mkisofs.exe";
+        "instances_path"      = $INSTANCES_DIR;
+        "interfaces_template" = $INTERFACES_TEMPLATE;
+        "policy_file"         = $POLICY_FILE;
+        "mkisofs_exe"         = $MKISO_EXE;
         "log_directory"       = $LOG_DIR;
-        "qemu_img_exe"        = Join-Path $BIN_DIR "qemu-img.exe";
+        "qemu_img_exe"        = $QEMU_IMG_EXE;
         "compute_driver"      = Get-ComputeDriver
         "vswitch_name"        = Get-JujuVMSwitchName
         "local_ip"            = (Get-CharmState -Namespace "novahyperv" -Key "local_ip");
@@ -142,17 +147,15 @@ function Write-ConfigFile {
         Write-JujuWarning "No such service $ServiceName. Not generating config"
         return $false
     }
-    $config = gc $service["template"]
+    
     # populate config with variables from context
     
     $incompleteContexts = [System.Collections.Generic.List[object]](New-Object "System.Collections.Generic.List[object]")
-    $allContexts = [System.Collections.Generic.List[object]](New-Object "System.Collections.Generic.List[object]")
-
+    $mergedContext = [System.Collections.Generic.Dictionary[string, object]](New-Object "System.Collections.Generic.Dictionary[string, object]")
+    
     foreach ($context in $service['context_generators']){
         Write-JujuInfo ("Getting context for {0}" -f $context["relation"])
-        $allContexts.Add($context["relation"])
         $ctx = & $context["generator"]
-        Write-JujuInfo ("Got {0} context: {1}" -f @($context["relation"], $ctx.Keys))
         if (!$ctx.Count){
             # Context is empty. Probably peer not ready
             Write-JujuWarning "Context for $context is EMPTY"
@@ -160,139 +163,24 @@ function Write-ConfigFile {
             $should_restart = $false
             continue
         }
-        foreach ($val in $ctx.GetEnumerator()) {
-            $regex = "{{[\s]{0,}" + $val.Name + "[\s]{0,}}}"
-            $config = $config -Replace $regex,$val.Value
+        Write-JujuInfo ("Got {0} context: {1}" -f @($context["relation"], $ctx.Keys))
+        foreach ($val in $ctx.Keys) {
+            $mergedContext[$val] = $ctx[$val]
         }
     }
-    Set-IncompleteStatusContext -ContextSet $allContexts -Incomplete $incompleteContexts
+    
+    if ($incompleteContexts){
+        $msg = "Incomplete relations: {0}" -f @($incompleteContexts -join ', ')
+        Set-JujuStatus -Status blocked -Message $msg
+    } 
+    else {
+        Set-JujuStatus -Status active -Message "Unit is ready"
+    }
     # Any variables not available in context we remove
-    $config = $config -Replace "{{[\s]{0,}[a-zA-Z0-9_-]{0,}[\s]{0,}}}",""
+    $config = Invoke-RenderTemplateFromFile -Template $service["template"] -Context $mergedContext
     Set-Content $service["config"] $config
     # Restart-Service $service["service"]
     return $should_restart
-}
-
-
-function Set-IncompleteStatusContext {
-    Param(
-        [array]$ContextSet=@(),
-        [array]$Incomplete=@()
-    )
-    $status = Get-JujuStatus -Full
-    $currentIncomplete = @()
-    if($status["message"]){
-        $msg = $status["message"].Split(":")
-        if($msg.Count -ne 2){
-            return
-        }
-        if($msg[0] -eq "Incomplete contexts") {
-            $currentIncomplete = $msg[1].Split(", ")
-        }
-    }
-    $newIncomplete = [System.Collections.Generic.List[object]](New-Object "System.Collections.Generic.List[object]")
-    if(!$Incomplete){
-        foreach($i in $currentIncomplete) {
-            if ($i -in $ContextSet){
-                continue
-            }
-            $newIncomplete.Add($i)
-        }
-    } else {
-        foreach($i in $currentIncomplete) {
-            if($i -in $ContextSet -and !($i -in $Incomplete)){
-                continue
-            } else {
-                $newIncomplete.Add($i)
-            }
-        }
-        foreach($i in $Incomplete) {
-            if ($i -in $newIncomplete) {
-                continue
-            }
-            $newIncomplete.Add($i)
-        }
-    }
-    if($newIncomplete){
-        $msg = "Incomplete contexts: {0}" -f ($newIncomplete -Join ", ")
-        Set-JujuStatus -Status blocked -Message $msg
-    } else {
-        Set-JujuStatus -Status waiting -Message "Contexts are complete"
-    }
-}
-
-
-# Returns an HashTable with the download URL, the checksum (with the hashing
-# algorithm) for a specific package. The URL config option for that package
-# is parsed. In case the checksum is not specified, 'CHECKSUM' and
-# 'HASHING_ALGORITHM' fields will be $null.
-function Get-URLChecksum {
-    Param(
-        [string]$URLConfigKey
-    )
-
-    $url = Get-JujuCharmConfig -Scope $URLConfigKey
-    if ($url.contains('#')) {
-        $urlSplit = $url.split('#')
-        $algorithm = $urlSplit[1]
-        if (!$algorithm.contains('=')) {
-            Throw ("Invalid algorithm format! " +
-                   "Use the format: <hashing_algorithm>=<checksum>")
-        }
-
-        $validHashingAlgorithms = @('SHA1', 'SHA256', 'SHA384', 'SHA512',
-                                    'MACTripleDES', 'MD5', 'RIPEMD160')
-        $algorithmSplit = $algorithm.split('=')
-        $hashingAlgorithm = $algorithmSplit[0]
-        if ($hashingAlgorithm -notin $validHashingAlgorithms) {
-            Throw ("Invalid hashing algorithm format! " +
-                   "Valid formats are: " + $validHashingAlgorithms)
-        }
-
-        $checksum = $algorithmSplit[1]
-        return @{ 'URL' = $urlSplit[0];
-                  'CHECKSUM' = $checksum;
-                  'HASHING_ALGORITHM' = $hashingAlgorithm }
-    }
-
-    return @{ 'URL' = $url;
-              'CHECKSUM' = $null;
-              'HASHING_ALGORITHM' = $null }
-}
-
-
-function Start-DownloadFile {
-    Param(
-        [Parameter(Mandatory=$True)]
-        [System.Uri]$Uri,
-        [string]$OutFile,
-        [switch]$SkipIntegrityCheck=$false
-    )
-
-    if(!$OutFile) {
-        $OutFile = $Uri.PathAndQuery.Substring($Uri.PathAndQuery.LastIndexOf("/") + 1)
-        if(!$OutFile) {
-            throw "The ""OutFile"" parameter needs to be specified"
-        }
-    }
-
-    $webClient = New-Object System.Net.WebClient
-    Start-ExecuteWithRetry { $webClient.DownloadFile($Uri, $OutFile) }
-
-    if(!$SkipIntegrityCheck) {
-        $fragment = $Uri.Fragment.Trim('#')
-        if (!$fragment){
-            return
-        }
-        $details = $fragment.Split("=")
-        $algorithm = $details[0]
-        $hash = $details[1]
-        if($algorithm -in @("SHA1", "SHA256", "SHA384", "SHA512", "MACTripleDES", "MD5", "RIPEMD160")){
-            Test-FileIntegrity -File $OutFile -Algorithm $algorithm -ExpectedHash $hash
-        } else {
-            Throw "Hash algorithm $algorithm not recognized."
-        }
-    }
 }
 
 
@@ -304,26 +192,13 @@ function Start-DownloadFile {
 function Get-PackagePath {
     Param(
         [Parameter(Mandatory=$True)]
-        [string]$URL,
-        [string]$Checksum="",
-        [string]$HashingAlgorithm=""
+        [string]$URL
     )
 
     $packagePath = Join-Path $env:TEMP $URL.Split('/')[-1]
-    if (Test-Path $packagePath) {
-        if ($Checksum -and $HashingAlgorithm) {
-            if (Test-FileIntegrity -File $packagePath -Algorithm $HashingAlgorithm -ExpectedHash $Checksum) {
-                return $packagePath
-            }
-        }
-        Remove-Item -Recurse -Force -Path $packagePath
-    }
-
-    if ($Checksum -and $HashingAlgorithm) {
-        Start-DownloadFile -Uri "$URL#$HashingAlgorithm=$Checksum" -OutFile $packagePath
-    } else {
-        Start-DownloadFile -Uri $URL -OutFile $packagePath -SkipIntegrityCheck
-    }
+    Start-ExecuteWithRetry {
+        Invoke-FastWebRequest -Uri $URL -OutFile $packagePath | Out-Null
+    } -RetryMessage "Download failed. Retrying"
 
     return $packagePath
 }
@@ -370,48 +245,31 @@ function Start-GitClonePull {
         [string]$Branch="master"
     )
 
-    if (!(Test-Path -Path $Path)) {
+    $projectDir = $Path
+    $gitPath = Join-Path $projectDir ".git"
+
+    if (!(Test-Path -Path $Path) -or !(Test-Path $gitPath)) {
+        rm $path -Recurse -Force -ErrorAction SilentlyContinue
         Start-ExecuteWithRetry {
-            Start-ExternalCommand -ScriptBlock { git clone $URL $Path } `
-                                  -ErrorMessage "Git clone failed"
+            Start-ExternalCommand -ScriptBlock { 
+                    git clone $URL $Path
+                    git -C $Path checkout $Branch
+                } `
+                        -ErrorMessage "Git clone failed"
         }
-        pushd $Path
-        Start-ExternalCommand -ScriptBlock { git checkout $Branch } `
-                              -ErrorMessage "Git checkout failed"
-        popd
-    } else {
-        pushd $Path
-        try {
-            $gitPath = Join-Path $Path ".git"
-            if (!(Test-Path -Path $gitPath)) {
-                Remove-Item -Recurse -Force *
-                Start-ExecuteWithRetry {
-                    Start-ExternalCommand -ScriptBlock { git clone $URL $Path } `
-                                          -ErrorMessage "Git clone failed"
-                }
-            } else {
-                Start-ExecuteWithRetry {
-                    Start-ExternalCommand -ScriptBlock { git fetch --all } `
-                                          -ErrorMessage "Git fetch failed"
-                }
-            }
-            Start-ExecuteWithRetry {
-                Start-ExternalCommand -ScriptBlock { git checkout $Branch } `
-                                      -ErrorMessage "Git checkout failed"
-            }
-            Get-ChildItem . -Include *.pyc -Recurse | foreach ($_) { Remove-Item $_.fullname }
-            Start-ExternalCommand -ScriptBlock { git reset --hard } `
-                                  -ErrorMessage "Git reset failed"
-            Start-ExternalCommand -ScriptBlock { git clean -f -d } `
-                                  -ErrorMessage "Git clean failed"
-            Start-ExecuteWithRetry {
-                Start-ExternalCommand -ScriptBlock { git pull } `
-                                      -ErrorMessage "Git pull failed"
-            }
-        } finally {
-            popd
+    } 
+    else {
+        Get-ChildItem -Path $Path -Include *.pyc -Recurse | foreach ($_) { Remove-Item $_.fullname }
+        Start-ExecuteWithRetry {
+            Start-ExternalCommand -ScriptBlock {
+                    git -C $Path checkout $Branch 
+                    git -C $Path reset --hard
+                    git -C $Path clean -f -d
+                    git -C $Path pull
+                } `
+                        -ErrorMessage "Git checkout failed"
         }
-    }
+    }   
 }
 
 
@@ -461,6 +319,7 @@ function Start-GerritGitPrep {
     }
 
     $projectDir = Join-Path $BUILD_DIR $ZuulProject
+    $gitmodulesDir = Join-Path $projectDir ".gitmodules"
     if (!(Test-Path -Path $projectDir -PathType Container)) {
         mkdir $projectDir
         try {
@@ -472,77 +331,85 @@ function Start-GerritGitPrep {
         }
     }
 
-    pushd $projectDir
-
-    Start-ExternalCommand { git remote set-url origin "$GitOrigin/$ZuulProject" } `
+    Start-ExternalCommand { git -C $projectDir remote set-url origin "$GitOrigin/$ZuulProject" } `
         -ErrorMessage "Failed to set origin: $GitOrigin/$ZuulProject"
 
     try {
-        Start-ExternalCommand { git remote update } -ErrorMessage "Failed to update remote"
-    } catch {
+        Start-ExternalCommand { git -C $projectDir remote update } -ErrorMessage "Failed to update remote"
+    }
+    catch {
         Write-JujuLog "The remote update failed, so garbage collecting before trying again."
-        Start-ExternalCommand { git gc } -ErrorMessage "Failed to run git gc."
-        Start-ExternalCommand { git remote update } -ErrorMessage "Failed to update remote"
+        Start-ExternalCommand {
+                git -C $projectDir gc
+                git -C $projectDir remote update
+            } `
+                    -ErrorMessage "Failed to update remote"
     }
 
-    Start-ExternalCommand { git reset --hard } -ErrorMessage "Failed to git reset"
+    Start-ExternalCommand { git -C $projectDir reset --hard } -ErrorMessage "Failed to git reset"
     try {
-        Start-ExternalCommand { git clean -x -f -d -q } -ErrorMessage "Failed to git clean"
-    } catch {
+        Start-ExternalCommand { git -C $projectDir clean -x -f -d -q } -ErrorMessage "Failed to git clean"
+    }
+    catch {
         sleep 1
-        Start-ExternalCommand { git clean -x -f -d -q } -ErrorMessage "Failed to git clean"
+        Start-ExternalCommand { git -C $projectDir clean -x -f -d -q } -ErrorMessage "Failed to git clean"
     }
 
     echo "Before doing git checkout:"
     echo "Git branch output:"
-    Start-ExternalCommand { git branch } -ErrorMessage "Failed to show git branch."
+    Start-ExternalCommand { git -C $projectDir branch } -ErrorMessage "Failed to show git branch."
     echo "Git log output:"
-    Start-ExternalCommand { git log -10 --pretty=format:"%h - %an, %ae, %ar : %s" } `
+    Start-ExternalCommand { git -C $projectDir log -10 --pretty=format:"%h - %an, %ae, %ar : %s" } `
         -ErrorMessage "Failed to show git log."
 
     $ret = echo "$ZuulRef" | Where-Object { $_ -match "^refs/tags/" }
     if ($ret) {
-        Start-ExternalCommand { git fetch --tags "$ZuulUrl/$ZuulProject" } `
-            -ErrorMessage "Failed to fetch tags from: $ZuulUrl/$ZuulProject"
-        Start-ExternalCommand { git checkout $ZuulRef } `
-            -ErrorMessage "Failed to fetch tags to: $ZuulRef"
-        Start-ExternalCommand { git reset --hard $ZuulRef } `
-            -ErrorMessage "Failed to hard reset to: $ZuulRef"
-    } elseif (!$ZuulNewrev) {
-        Start-ExternalCommand { git fetch "$ZuulUrl/$ZuulProject" $ZuulRef } `
-            -ErrorMessage "Failed to fetch: $ZuulUrl/$ZuulProject $ZuulRef"
-        Start-ExternalCommand { git checkout FETCH_HEAD } `
-            -ErrorMessage "Failed to checkout FETCH_HEAD"
-        Start-ExternalCommand { git reset --hard FETCH_HEAD } `
-            -ErrorMessage "Failed to hard reset FETCH_HEAD"
-    } else {
-        Start-ExternalCommand { git checkout $ZuulNewrev } `
-            -ErrorMessage "Failed to checkout $ZuulNewrev"
-        Start-ExternalCommand { git reset --hard $ZuulNewrev } `
-            -ErrorMessage "Failed to hard reset $ZuulNewrev"
+        Start-ExternalCommand {
+                git -C $projectDir fetch --tags "$ZuulUrl/$ZuulProject"
+                git -C $projectDir checkout $ZuulRef
+                git -C $projectDir reset --hard $ZuulRef
+            } `
+                    -ErrorMessage "Failed to fetch tags from: $ZuulUrl/$ZuulProject"
+    }
+    elseif (!$ZuulNewrev) {
+        Start-ExternalCommand {
+                git -C $projectDir fetch "$ZuulUrl/$ZuulProject" $ZuulRef
+                git -C $projectDir checkout FETCH_HEAD
+                git -C $projectDir reset --hard FETCH_HEAD
+            } `
+                    -ErrorMessage "Failed to fetch: $ZuulUrl/$ZuulProject $ZuulRef"
+    }
+    else {
+        Start-ExternalCommand {
+                git -C $projectDir checkout $ZuulNewrev
+                git -C $projectDir reset --hard $ZuulNewrev
+            } `
+                    -ErrorMessage "Failed to checkout $ZuulNewrev"
     }
 
     try {
-        Start-ExternalCommand { git clean -x -f -d -q } -ErrorMessage "Failed to git clean"
+        Start-ExternalCommand { git -C $projectDir clean -x -f -d -q } -ErrorMessage "Failed to git clean"
     } catch {
         sleep 1
-        Start-ExternalCommand { git clean -x -f -d -q } -ErrorMessage "Failed to git clean"
+        Start-ExternalCommand { git -C $projectDir clean -x -f -d -q } -ErrorMessage "Failed to git clean"
     }
 
-    if (Test-Path .gitmodules) {
-        Start-ExternalCommand { git submodule init } -ErrorMessage "Failed to init submodule"
-        Start-ExternalCommand { git submodule sync } -ErrorMessage "Failed to sync submodule"
-        Start-ExternalCommand { git submodule update --init } -ErrorMessage "Failed to update submodule"
+    if (Test-Path $gitmodulesDir) {
+        Start-ExternalCommand { 
+                git -C $projectDir submodule init
+                git -C $projectDir submodule sync
+                git -C $projectDir submodule update --init
+            } `
+                    -ErrorMessage "Failed to init submodule"
     }
 
     echo "Final result:"
     echo "Git branch output:"
-    Start-ExternalCommand { git branch } -ErrorMessage "Failed to show git branch."
+    Start-ExternalCommand { git -C $projectDir branch } -ErrorMessage "Failed to show git branch."
     echo "Git log output:"
-    Start-ExternalCommand { git log -10 --pretty=format:"%h - %an, %ae, %ar : %s" } `
+    Start-ExternalCommand { git -C $projectDir log -10 --pretty=format:"%h - %an, %ae, %ar : %s" } `
         -ErrorMessage "Failed to show git log."
 
-    popd
 }
 
 
@@ -558,37 +425,45 @@ function Install-Projects ($buildFor) {
     # Individual projects
     # Nova
     if ($buildFor -eq "openstack/nova") {
-        $novaBin = (Get-CharmServices)['nova']['binary']
-        if (!(Test-Path $novaBin)) {
-            Throw "$novaBin was not found."
-        }
-
-        Write-JujuLog "Copying default config files"
-        $defaultConfigFiles = @('rootwrap.d', 'api-paste.ini', 'cells.json',
-                                'rootwrap.conf')
-        foreach ($config in $defaultConfigFiles) {
-            Copy-Item -Recurse -Force "$openstackBuild\nova\etc\nova\$config" $CONFIG_DIR
-        }
-        Copy-Item -Force (Join-Path (Get-TemplatesDir) "policy.json") $CONFIG_DIR
-        Copy-Item -Force (Join-Path (Get-TemplatesDir) "interfaces.template") $CONFIG_DIR
+        Invoke-BuildNova
     }
     # Networking-Hyperv
     if ($buildFor -eq "openstack/networking-hyperv") {
-        $neutronBin = (Get-CharmServices)['neutron']['binary']
-        if (!(Test-Path $neutronBin)) {
-            Throw "$neutronBin was not found."
-        }
+        Invoke-BuildNeutron
     }
 }
 
+
+function Invoke-BuildNova {
+    $novaBin = (Get-CharmServices)['nova']['binary']
+    if (!(Test-Path $novaBin)) {
+       Throw "$novaBin was not found."
+    }
+
+    Write-JujuLog "Copying default config files"
+    $defaultConfigFiles = @('rootwrap.d', 'api-paste.ini', 'cells.json',
+                                'rootwrap.conf')
+    foreach ($config in $defaultConfigFiles) {
+        Copy-Item -Recurse -Force "$openstackBuild\nova\etc\nova\$config" $CONFIG_DIR
+    }
+    Copy-Item -Force (Join-Path (Get-TemplatesDir) "policy.json") $CONFIG_DIR
+    Copy-Item -Force (Join-Path (Get-TemplatesDir) "interfaces.template") $CONFIG_DIR
+}
+
+
+function Invoke-BuildNeutron {
+    $neutronBin = (Get-CharmServices)['neutron']['binary']
+    if (!(Test-Path $neutronBin)) {
+        Throw "$neutronBin was not found."
+    }
+}
+
+
 function Get-ComputeDriver {
     if ($buildFor -eq "openstack/compute-hyperv") {
-        $compute_driver = "hyperv.nova.driver.HyperVDriver"
+        return "hyperv.nova.driver.HyperVDriver"
     }
-    else {
-        $compute_driver = "hyperv.driver.HyperVDriver"
-    }
-    return $compute_driver
+    return "hyperv.driver.HyperVDriver"
 }
 
 function Install-NetworkType {
@@ -611,19 +486,6 @@ function Install-NetworkType {
     }
 }
 
-#function Install-NetworkingHyperV {
-#    Write-JujuLog "Installing networking-hyperv"
-#
-#    $openstackBuild = Join-Path $BUILD_DIR "openstack"
-#    Start-ExecuteWithRetry {
-#        Install-OpenStackProjectFromRepo "$openstackBuild\networking-hyperv"
-#    }
-#    $neutronBin = (Get-CharmServices)['neutron']['binary']
-#    if (!(Test-Path $neutronBin)) {
-#        Throw "$neutronBin was not found."
-#    }
-#}
-
 
 function Install-OVS {
     param(
@@ -639,15 +501,14 @@ function Install-OVS {
     }
 
     $hasInstaller = Test-Path $InstallerPath
-    if($hasInstaller -eq $false){
+    if(!(Test-Path $InstallerPath)){
         $InstallerPath = Get-OVSInstaller
     }
 
     Write-JujuInfo "Installing from $InstallerPath"
-    $ret = Start-Process -FilePath msiexec.exe -ArgumentList "INSTALLDIR=`"$OVS_DIR`"","/qb","/l*v","$env:APPDATA\ovs-log.txt","/i","$InstallerPath" -Wait -PassThru
-    if($ret.ExitCode) {
-        Throw "Failed to install OVS: $LASTEXITCODE"
-    }
+    $logFile = Join-Path $env:APPDATA "ovs-installer-log.txt"
+    $extraParams = @("INSTALLDIR=`"$OVS_DIR`"")
+    Install-Msi -Installer $installerPath -LogFilePath $logFile -ExtraArgs $extraParams
     Remove-Item $InstallerPath
     return $true
 }
@@ -669,16 +530,14 @@ function Import-OVSCertificate {
 
 
 function Get-OVSInstaller {
-    $urlChecksum = Get-URLChecksum "ovs-installer-url"
-    $location = Get-PackagePath $urlChecksum['URL'] $urlChecksum['CHECKSUM'] `
-                                $urlChecksum['HASHING_ALGORITHM']
+    $ovsinstallerURL = Get-JujuCharmConfig -Scope 'ovs-installer-url'
+    $location = Get-PackagePath $ovsinstallerURL
     return $location
 }
 
 function Get-OVSCertificate {
-    $urlChecksum = Get-URLChecksum "ovs-certificate-url"
-    $location = Get-PackagePath $urlChecksum['URL'] $urlChecksum['CHECKSUM'] `
-                                $urlChecksum['HASHING_ALGORITHM']
+    $ovscertURL = Get-JujuCharmConfig -Scope 'ovs-certificate-url'
+    $location = Get-PackagePath $ovscertURL
     return $location
 }
 
@@ -829,17 +688,16 @@ function Initialize-GitRepository {
     foreach ($commit in $CherryPicks) {
         Write-JujuLog ("Cherry-picking commit {0} from {1}, branch {2}" -f
                        @($commit['commit_id'], $commit['git_url'], $commit['branch_name']))
-        pushd $BuildFolder
-        $currentCommit = Start-ExternalCommand { git rev-parse HEAD }
-        $cherryCommit = $commit['commit_id']
-        if ($currentCommit -eq $cherryCommit) {
-            Write-JujuLog "Already in cherry-pick commit"
-            popd
+        try {
+            Start-ExternalCommand {
+                git -C $BuildFolder fetch $commit['git_url'] $commit['branch_name']
+                git -C $BuildFolder cherry-pick $commit['commit_id']
+            }
         }
-        else {
-            Start-ExternalCommand { git fetch $commit['git_url'] $commit['branch_name'] }
-            Start-ExternalCommand { git cherry-pick $commit['commit_id'] }
-            popd
+        catch {
+            # If the same cherry-pick is applied twice it will error.
+            # This catch is made so the hook will not fail on that error.
+            Write-JujuWarning "Git cherry-pick has errored. This is probably because you are trying to cherry-pick the already applied patch."
         }
     }
 }
@@ -925,11 +783,8 @@ function Initialize-Environment {
         foreach ($project in $standardProjects) {
             Install-Projects $project
         }
-        if (($buildFor -eq "none") -or ($buildFor -eq "openstack/networking-hyperv")) {
-            Install-NetworkType
-        }
-        else {
-            Install-NetworkType
+        Install-NetworkType
+        if (($buildFor -ne "none") -and ($buildFor -ne "openstack/networking-hyperv")) {
             Install-Projects $buildFor
         }
     }
@@ -944,7 +799,8 @@ function Set-ServiceAcountCredentials {
         [string]$ServicePassword
     )
 
-    $filter = 'Name=' + "'" + $ServiceName + "'" + ''
+    $filter = "Name='{0}'" -f $ServiceName
+    #$filter = 'Name=' + "'" + $ServiceName + "'" + ''
     $service = Get-WMIObject -Namespace "root\cimv2" -Class Win32_Service -Filter $filter
     $service.StopService()
     while ($service.Started) {
@@ -967,7 +823,8 @@ function New-OpenStackService {
         [string]$ServicePassword
     )
 
-    $filter='Name=' + "'" + $ServiceName + "'"
+    $filter = "Name='{0}'" -f $ServiceName
+    #$filter='Name=' + "'" + $ServiceName + "'"
 
     $service = Get-WmiObject -Namespace "root\cimv2" -Class Win32_Service -Filter $filter
     if($service) {
@@ -1000,11 +857,13 @@ function Watch-ServiceStatus {
     $count = 0
     while ($count -lt $IntervalSeconds) {
         if ((Get-Service -Name $ServiceName).Status -ne "Running") {
-            Throw "$ServiceName has errors. Please check the logs."
+            $count += 1
+            Start-Sleep -Seconds 1
+            continue
         }
-        $count += 1
-        Start-Sleep -Seconds 1
+        return
     }
+    Throw "$ServiceName has errors. Please check the logs."
 }
 
 
@@ -1205,27 +1064,103 @@ function Start-ConfigureVMSwitch {
 }
 
 
-function Install-Dependency {
-    Param(
-        [string]$URLConfigKey,
-        [array]$ArgumentList
-    )
+function Install-VC2012 {
+    $vcURL = Get-JujuCharmConfig -Scope 'vc-2012-url'
+    $installerPath = Get-PackagePath $vcURL
+    $ArgumentList = @("/q")
+    Write-JujuWarning "Installing VC2012 from '$installerPath'"
 
-    $urlChecksum = Get-URLChecksum $URLConfigKey
-    if ($urlChecksum['CHECKSUM'] -and $urlChecksum['HASHING_ALGORITHM']) {
-        Install-Package -URL $urlChecksum['URL'] -Checksum $urlChecksum['CHECKSUM'] `
-                        -HashingAlgorithm $urlChecksum['HASHING_ALGORITHM'] `
-                        -ArgumentList $ArgumentList
-    } else {
-        Install-Package -URL $urlChecksum['URL'] -ArgumentList $ArgumentList
+    $stat = Start-Process -FilePath $installerPath -ArgumentList $ArgumentList `
+                           -PassThru -Wait
+    if ($stat.ExitCode -ne 0) {
+        throw "Package '$URL' failed to install."
     }
+    Remove-Item $installerPath
+ 
+    Write-JujuLog "Finished installing VC2012."
+}
+
+
+function Install-Git {
+    $gitURL = Get-JujuCharmConfig -Scope 'git-url'
+    $installerPath = Get-PackagePath $gitURL
+    $ArgumentList = @("/SILENT")
+    Write-JujuLog "Installing Git from '$installerPath'"
+
+    $stat = Start-Process -FilePath $installerPath -ArgumentList $ArgumentList `
+                           -PassThru -Wait
+    if ($stat.ExitCode -ne 0) {
+        throw "Package '$URL' failed to install."
+    }
+    Remove-Item $installerPath
+ 
+    Write-JujuLog "Finished installing Git."
+}
+
+
+function Install-Python27 {
+    $pythonURL = Get-JujuCharmConfig -Scope 'python27-url'
+    $installerPath = Get-PackagePath $pythonURL
+    Write-JujuLog "Installing Python27 from '$installerPath'"
+
+    $logFile = Join-Path $env:APPDATA "python-installer-log.txt"
+    $extraParams = @("/qn")
+    Install-Msi -Installer $installerPath -LogFilePath $logFile -ExtraArgs $extraParams
+
+    Write-JujuLog "Finished installing Python27."
+}
+
+
+function Install-Pip {
+    Write-JujuLog "Installing pip"
+    $pipURL = "https://bootstrap.pypa.io/get-pip.py"
+    $installerPath = Get-PackagePath $pipURL
+    $conf_pip_version = Get-JujuCharmConfig -Scope 'pip-version'
+    Start-ExternalCommand -ScriptBlock { python $installerPath $conf_pip_version } -ErrorMessage "Failed to install pip."
+    Remove-Item $installerPath
+    $version = Start-ExternalCommand { pip.exe --version } -ErrorMessage "Failed to get pip version."
+    Write-JujuLog "Pip version: $version"
+}
+
+
+function Install-PipDependencies {
+    Write-JujuLog "Installing pip dependencies"
+    $pythonPkgs = Get-JujuCharmConfig -Scope 'extra-python-packages'
+    if ($pythonPkgs) {
+        $pythonPkgsArr = $pythonPkgs.Split()
+        foreach ($pythonPkg in $pythonPkgsArr) {
+            Write-JujuLog "Installing $pythonPkg"
+            Start-ExternalCommand -ScriptBlock { pip install -U $pythonPkg } `
+                                    -ErrorMessage "Failed to install $pythonPkg"
+        }
+    }
+}
+
+
+function Install-PosixLibrary {
+    Write-JujuLog "Installing posix_ipc library"
+    $zipPath = Join-Path $FILES_DIR "posix_ipc.zip"
+    $posixIpcEgg = Join-Path $LIB_DIR "posix_ipc-0.9.8-py2.7.egg-info"
+    if (!(Test-Path $posixIpcEgg)) {
+        Expand-ZipArchive $zipPath $LIB_DIR
+    }
+}
+
+
+function Install-PyWin32 {
+    Write-JujuLog "Installing pywin32"
+    Start-ExternalCommand -ScriptBlock { pip install pywin32 } `
+                          -ErrorMessage "Failed to install pywin32."
+    Start-ExternalCommand {
+        python "$PYTHON_DIR\Scripts\pywin32_postinstall.py" -install
+    } -ErrorMessage "Failed to run pywin32_postinstall.py"
 }
 
 
 function Install-FreeRDPConsole {
     Write-JujuLog "Installing FreeRDP"
 
-    Install-Dependency 'vc-2012-url' @('/q')
+    Install-VC2012
 
     $freeRDPZip = Join-Path $FILES_DIR "FreeRDP_powershell.zip"
     $charmLibDir = Join-Path (Get-JujuCharmDir) "lib"
@@ -1317,6 +1252,47 @@ function Import-CloudbaseCert {
 }
 
 
+function Set-AD2DevstackCreds {
+    $adUserCred = @{
+        'domain'   = $adCtx["domainName"];
+        'username' = $adCtx['adcredentials'][0]['username'];
+        'password' = $adCtx['adcredentials'][0]['password']
+    }
+    $relationParams = @{'ad_credentials' = (Get-MarshaledObject $adUserCred);}
+    Set-DevStackRelationParams $relationParams
+}
+
+
+function Join-ADDomain {
+    $adCtx = Get-ActiveDirectoryContext
+    if (Confirm-IsInDomain $adCtx["domainName"]) {
+        # Add AD user to local Administrators group
+        Grant-PrivilegesOnDomainUser $adCtx['adcredentials'][0]['username']
+        Enable-LiveMigration
+    }
+    else {
+        Start-JoinDomain
+    }
+}
+
+
+function Enable-LiveMigration {
+    Write-JujuLog "Enabling live migration"
+    Enable-VMMigration
+    $name = Get-MainNetadapter
+    $netAddresses = Get-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4
+    foreach($netAddress in $netAddresses) {
+        $prefixLength = $netAddress.PrefixLength
+        $netmask = ConvertTo-Mask -MaskLength $prefixLength
+        $networkAddress = Get-NetworkAddress -IPAddress $netAddress.IPAddress -SubnetMask $netmask
+        $migrationNet = Get-VMMigrationNetwork | Where-Object { $_.Subnet -eq "$networkAddress/$prefixLength" }
+        if (!$migrationNet) {
+            Add-VMMigrationNetwork -Subnet "$networkAddress/$prefixLength" -Confirm:$false
+        }
+    }
+}
+
+
 # HOOKS FUNCTIONS
 
 function Start-InstallHook {
@@ -1330,10 +1306,28 @@ function Start-InstallHook {
 
     Start-TimeResync
 
+    # Set Administrator user password
+    $admin_user = "Administrator"
+    $admin_password = Get-JujuCharmConfig -Scope 'administrator-password'
+    net user $admin_user "$admin_password"
+    
+    # Install Hyperv feature if not present
     if (!(Get-WindowsFeature hyper-v).Installed) {
         Install-WindowsFeature -Name Hyper-V -includemanagementtools
+        #Invoke-JujuReboot -Now
+    }
+    
+    # Allow self-signed drivers installation
+    $bcdedit = "C:\bcdedit.txt"
+    $signingStatus = Get-JujuCharmConfig -Scope "test-signing"
+    if ((!(Test-Path -path $bcdedit)) -and ($signingStatus)){
+        bcdedit -set loadoptions DDISABLE_INTEGRITY_CHECKS
+        bcdedit -set TESTSIGNING ON
+        New-Item -ItemType file $bcdedit
+        Write-JujuLog "Restarting in order to enable test signing."
         Invoke-JujuReboot -Now
     }
+    
 
     # Disable firewall
     Start-ExternalCommand { netsh.exe advfirewall set allprofiles state off } -ErrorMessage "Failed to disable firewall."
@@ -1343,20 +1337,6 @@ function Start-InstallHook {
     $update_service.ChangeStartMode("Disabled")
     $update_service.StopService()
 
-    # Allow self-signed drivers installation
-    $bcdedit = "C:\bcdedit.txt"
-    $signingStatus = Get-JujuCharmConfig -Scope "test-signing"
-    if ((!(Test-Path -path $bcdedit)) -and ($signingStatus)){
-        bcdedit -set loadoptions DDISABLE_INTEGRITY_CHECKS
-        bcdedit -set TESTSIGNING ON
-        New-Item -ItemType file $bcdedit
-        Invoke-JujuReboot
-    }
-    
-    # Set Administrator user password
-    $admin_user = "Administrator"
-    $admin_password = Get-JujuCharmConfig -Scope 'administrator-password'
-    net user $admin_user "$admin_password"
     
     Write-JujuLog "Enable and start MSiSCSI"
     $msiscsi_service = Get-WmiObject Win32_Service -Filter 'Name="MSiSCSI"'
@@ -1368,12 +1348,12 @@ function Start-InstallHook {
     Write-PipConfigFile
 
     # Install Git
-    Install-Dependency 'git-url' @('/SILENT')
+    Install-Git
     Add-ToUserPath "${env:ProgramFiles(x86)}\Git\cmd"
     Add-ToSystemPath "${env:ProgramFiles(x86)}\Git\cmd"
 
     # Install Python 2.7.x (x86)
-    Install-Dependency 'python27-url' @('/qn')
+    Install-Python27
     Add-ToUserPath "${env:SystemDrive}\Python27;${env:SystemDrive}\Python27\scripts"
     Add-ToSystemPath "${env:SystemDrive}\Python27;${env:SystemDrive}\Python27\scripts"
 
@@ -1383,39 +1363,17 @@ function Start-InstallHook {
         Install-FreeRDPConsole
     }
 
-    Write-JujuLog "Installing pip"
-    $conf_pip_version = Get-JujuCharmConfig -Scope 'pip-version'
-    $tmpPath = Join-Path $env:TEMP "get-pip.py"
-    Start-DownloadFile -Uri "https://bootstrap.pypa.io/get-pip.py" -SkipIntegrityCheck -OutFile $tmpPath
-    Start-ExternalCommand -ScriptBlock { python $tmpPath $conf_pip_version } -ErrorMessage "Failed to install pip."
-    Remove-Item $tmpPath
-    $version = Start-ExternalCommand { pip.exe --version } -ErrorMessage "Failed to get pip version."
-    Write-JujuLog "Pip version: $version"
+    # Install PIP
+    Install-Pip
 
-    Write-JujuLog "Installing pip dependencies"
-    $pythonPkgs = Get-JujuCharmConfig -Scope 'extra-python-packages'
-    if ($pythonPkgs) {
-        $pythonPkgsArr = $pythonPkgs.Split()
-        foreach ($pythonPkg in $pythonPkgsArr) {
-            Write-JujuLog "Installing $pythonPkg"
-            Start-ExternalCommand -ScriptBlock { pip install -U $pythonPkg } `
-                                    -ErrorMessage "Failed to install $pythonPkg"
-        }
-    }
+    # Install dependencies from juju config
+    Install-PipDependencies
 
-    Write-JujuLog "Installing posix_ipc library"
-    $zipPath = Join-Path $FILES_DIR "posix_ipc.zip"
-    $posixIpcEgg = Join-Path $LIB_DIR "posix_ipc-0.9.8-py2.7.egg-info"
-    if (!(Test-Path $posixIpcEgg)) {
-        Expand-ZipArchive $zipPath $LIB_DIR
-    }
+    # Install Posix library
+    Install-PosixLibrary
 
-    Write-JujuLog "Installing pywin32"
-    Start-ExternalCommand -ScriptBlock { pip install pywin32 } `
-                          -ErrorMessage "Failed to install pywin32."
-    Start-ExternalCommand {
-        python "$PYTHON_DIR\Scripts\pywin32_postinstall.py" -install
-    } -ErrorMessage "Failed to run pywin32_postinstall.py"
+    # Install pip pywin32
+    Install-PyWin32
     
     $zuulUrl = Get-JujuCharmConfig -Scope 'zuul-url'
     $zuulRef = Get-JujuCharmConfig -Scope 'zuul-ref'
@@ -1481,48 +1439,34 @@ function Start-RelationHooks {
     } else {
         Throw "ERROR: Unknown network type: '$networkType'."
     }
-
+    
     $adCtx = Get-ActiveDirectoryContext
+    
     if (!$adCtx.Count) {
         Write-JujuLog "AD context is not ready."
-    } else {
-        Start-JoinDomain
-
-        try {
-            # Enable Live Migration
-            Start-ExternalCommand { Enable-VMMigration } -ErrorMessage "Failed to enable live migation." -ErrorAction silentlycontinue
-            Start-ExternalCommand { Set-VMHost -useanynetworkformigration $true } -ErrorMessage "Failed setting using any network for migration" -ErrorAction silentlycontinue
-            Start-ExternalCommand { Set-VMHost -VirtualMachineMigrationAuthenticationType Kerberos } -ErrorMessage "Failed setting VM migartion authentication type" -ErrorAction silentlycontinue
-        } Catch {
-            # TODO: better handling maybe move this to start-joindomain function
-            Write-JujuLog "Failed configuring migration, might be already set from a previous run"
-        }     
-
-        $adUserCred = @{
-            'domain'   = $adCtx["domainName"];
-            'username' = $adCtx['adcredentials'][0]['username'];
-            'password' = $adCtx['adcredentials'][0]['password']
-        }
-        $relationParams = @{'ad_credentials' = (Get-MarshaledObject $adUserCred);}
-        Set-DevStackRelationParams $relationParams
-
-        # Add AD user to local Administrators group
-        Grant-PrivilegesOnDomainUser $adCtx['adcredentials'][0]['username']
-
-        foreach($key in $charmServices.Keys) {
-            New-OpenStackService $charmServices[$key]['service_name'] $charmServices[$key]['description'] `
-                                 $charmServices[$key]['binary'] $charmServices[$key]['config'] `
-                                 $adCtx['adcredentials'][0]['username'] `
-                                 $adCtx['adcredentials'][0]['password']
-            Write-ConfigFile $key
-        }
     }
-
+    else {
+        Join-ADDomain
+        Set-AD2DevstackCreds
+    }
+    
     $devstackCtx = Get-DevStackContext
+    
     if (!$devstackCtx.Count -or !$adCtx.Count) {
         Write-JujuLog ("Both AD context and DevStack context must be complete " +
                        "before starting the OpenStack services.")
-    } else {
+    }
+    else {
+        # Create services and write configs.
+        foreach($key in $charmServices.Keys) {
+            New-OpenStackService $charmServices[$key]['service_name'] $charmServices[$key]['description'] `
+                                $charmServices[$key]['binary'] $charmServices[$key]['config'] `
+                                $adCtx['adcredentials'][0]['username'] `
+                                $adCtx['adcredentials'][0]['password']
+            Write-ConfigFile $key
+        }
+    
+        # Start Openstack Services
         Start-Service "MSiSCSI"
         Write-JujuLog "Starting OpenStack services"
         $pollingInterval = 60

@@ -81,7 +81,7 @@ function Grant-Privilege {
         }
     }
     PROCESS {
-        # Write-JujuInfo "Running: $privBin -g $User -v $Grant"
+        #Write-JujuInfo "Running: $privBin -g $User -v $Grant"
         $cmd = @($privBin, "-g", "$User", "-v", $Grant)
         Invoke-JujuCommand -Command $cmd | Out-Null
     }
@@ -154,6 +154,8 @@ function Get-ComponentIsInstalled {
     This commandlet checks if a program is installed and returns a boolean value. Exact product names must be used, wildcards are not accepted.
     .PARAMETER Name
     The name of the product to check for
+    .PARAMETER Exact
+    Search for exact name or allow wildcards such as "%"
 
     .NOTES
     This commandlet is not supported on Nano server
@@ -161,7 +163,8 @@ function Get-ComponentIsInstalled {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)]
-        [string]$Name
+        [string]$Name,
+        [switch]$Exact=$true
     )
     BEGIN {
         if((Get-IsNanoServer)) {
@@ -172,10 +175,14 @@ function Get-ComponentIsInstalled {
         }
     }
     PROCESS {
-        $products = Get-ManagementObject -Class Win32_Product
-        $component = $products | Where-Object { $_.Name -eq $Name}
+        $modifier = " LIKE "
+        if ($Exact){
+            $modifier = "="
+        }
+        $query = ("Name{0}'{1}'" -f @($modifier, $Name))
+        $products = Get-ManagementObject -Class Win32_Product -Filter $query
 
-        return ($component -ne $null)
+        return ($products.Count -ne 0)
     }
 }
 
@@ -266,6 +273,8 @@ function Install-Msi {
     Full path to the MSI installer
     .PARAMETER LogFilePath
     The path to the install log file.
+    .PARAMETER ExtraArgs
+    Extra arguments passed to the installer.
     #>
     [CmdletBinding()]
     param(
@@ -273,7 +282,9 @@ function Install-Msi {
         [Alias("MsiFilePath")]
         [string]$Installer,
         [Parameter(Mandatory=$false)]
-        [string]$LogFilePath
+        [string]$LogFilePath,
+        [Parameter(Mandatory=$false)]
+        [string[]]$ExtraArgs
     )
     PROCESS {
         $args = @(
@@ -288,6 +299,10 @@ function Install-Msi {
                 New-Item -ItemType Directory $parent
             }
             $args += @("/l*v", $LogFilePath)
+        }
+
+        if($ExtraArgs) {
+            $args += $ExtraArgs
         }
 
         if (!(Test-Path $Installer)){
@@ -324,7 +339,7 @@ function Expand-ZipArchive {
         try {
             # This will work on PowerShell >= 5.0 (default on Windows 10/Windows Server 2016).
             Expand-Archive -Path $normZipPath -DestinationPath $Destination
-        } catch [System.Management.Automation.CommandNotFoundException] {
+        } catch [System.Management.Automation.ItemNotFoundException], [System.Management.Automation.CommandNotFoundException] {
             try {
                 # Try without loading system.io.compression.filesystem. This will work by default on Nano
                 [System.IO.Compression.ZipFile]::ExtractToDirectory($normZipPath, $Destination)
@@ -338,23 +353,61 @@ function Expand-ZipArchive {
 }
 
 function Install-WindowsFeatures {
+    <#
+    .SYNOPSIS
+    This function installs windows features. For Nano, you already need to have the features installed, and this function merely enables them.
+    .PARAMETER Features
+    Array of Windows feature names that will be installed (or enabled on Nano).
+    #>
     [CmdletBinding()]
-    param(
+    Param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [array]$Features
+    )
+    PROCESS {
+        if(Get-IsNanoServer) {
+            Enable-OptionalWindowsFeatures -Features $Features
+            return
+        }
+        $rebootNeeded = $false
+        foreach ($feature in $Features) {
+            $state = Install-WindowsFeature -Name $feature -IncludeManagementTools -ErrorAction Stop
+            if ($state.Success -ne $true) {
+                Throw "Install failed for feature $feature"
+            }
+            if ($state.RestartNeeded -eq 'Yes') {
+                $rebootNeeded = $true
+            }
+        }
+        if ($rebootNeeded) {
+            Invoke-JujuReboot -Now
+        }
+    }
+}
+
+function Enable-OptionalWindowsFeatures {
+    <#
+    .SYNOPSIS
+    This function enables optional windows features.
+    .PARAMETER Features
+    Array of optional Windows feature names that will be enabled.
+    #>
+    [CmdletBinding()]
+    Param(
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
         [array]$Features
     )
     PROCESS {
         $rebootNeeded = $false
         foreach ($feature in $Features) {
-            $state = Start-ExecuteWithRetry -Command {
-                Install-WindowsFeature -Name $feature -ErrorAction Stop
-            }
-            if ($state.Success -eq $true) {
-                if ($state.RestartNeeded -eq 'Yes') {
+            $state = Get-WindowsOptionalFeature -Online -FeatureName $feature
+            if ($state.State -ne "Enabled") {
+                $state = Enable-WindowsOptionalFeature -Online -FeatureName $feature -All -NoRestart
+                if ($state.RestartNeeded) {
                     $rebootNeeded = $true
                 }
-            } else {
-                throw "Install failed for feature $feature"
+            } elseif ($state.RestartNeeded) {
+                $rebootNeeded = $true
             }
         }
         if ($rebootNeeded) {
@@ -552,7 +605,7 @@ function Confirm-IsMemberOfGroup {
     PROCESS {
         $inDomain = (Get-ManagementObject -Class Win32_ComputerSystem).PartOfDomain
         if($inDomain){
-            $domainName = (Get-ManagementObject -Class Win32_NTDomain).DomainName
+            $domainName = (Get-ManagementObject -Class Win32_ComputerSystem).Domain
             $myDomain = [Environment]::UserDomainName
             if($domainName -eq $myDomain) {
                 return (Get-UserGroupMembership -Username $Username -GroupSID $GroupSID)
@@ -712,6 +765,10 @@ function Add-WindowsUser {
     The user name of the new user
     .PARAMETER Password
     The password the user will authenticate with
+    .PARAMETER Fullname
+    The user full name. Applies only when user doesn't exist already.
+    .PARAMETER Description
+    The description for the user. Applies only when user doesn't exist already.
     .NOTES
     This commandlet creates a local user that never expires, and which is not required to reset the password on first logon.
     #>
@@ -720,7 +777,11 @@ function Add-WindowsUser {
         [parameter(Mandatory=$true)]
         [string]$Username,
         [parameter(Mandatory=$true)]
-        [string]$Password
+        [string]$Password,
+        [parameter(Mandatory=$false)]
+        [string]$Fullname,
+        [parameter(Mandatory=$false)]
+        [String]$Description
     )
     PROCESS {
         try {
@@ -731,6 +792,12 @@ function Add-WindowsUser {
         $cmd = @("net.exe", "user", $Username)
         if (!$exists) {
             $cmd += @($Password, "/add", "/expires:never", "/active:yes")
+            if($Fullname) {
+                $cmd += "/fullname:{0}" -f @($Fullname)
+            }
+            if($Description) {
+                $cmd += "/comment:{0}" -f @($Description)
+            }
         } else {
             $cmd += $Password
         }

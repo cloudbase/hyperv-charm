@@ -65,12 +65,13 @@ FunctionsToExport = @(
     "Start-ExecuteWithRetry",
     "Get-SanePath",
     "Add-ToUserPath",
+    "Add-ToSystemPath",
     "Get-MarshaledObject",
     "Get-UnmarshaledObject",
     "Get-CmdStringFromHashtable",
     "Get-EscapedQuotedString",
-    "Add-ToSystemPath",
-    "Get-PSStringParamsFromHashtable")
+    "Get-PSStringParamsFromHashtable",
+    "Start-RenderTemplate")
 
 # Cmdlets to export from this module
 CmdletsToExport = '*'
