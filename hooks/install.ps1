@@ -7,7 +7,7 @@ Import-Module JujuLogging
 
 try {
     Import-Module HyperVCIHooks
-    Start-InstallHook
+    Invoke-InstallHook
 } catch {
     Write-HookTracebackToLog $_
     exit 1

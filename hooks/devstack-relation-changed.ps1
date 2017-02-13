@@ -7,7 +7,7 @@ Import-Module JujuLogging
 
 try {
     Import-Module HyperVCIHooks
-    Start-RelationHooks
+    Invoke-RelationHooks
 } catch {
     Write-HookTracebackToLog $_
     exit 1

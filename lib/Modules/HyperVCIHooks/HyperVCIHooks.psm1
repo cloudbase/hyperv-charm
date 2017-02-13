@@ -18,24 +18,24 @@ $NETWORKING_HYPERV_GIT = "https://github.com/openstack/networking-hyperv.git"
 $COMPUTE_HYPERV_GIT    = "https://github.com/openstack/compute-hyperv.git"
 $OSWIN_GIT             = "https://git.openstack.org/openstack/os-win.git"
 
-$OPENSTACK_DIR  = Join-Path $env:SystemDrive "OpenStack"
-$PYTHON_DIR     = Join-Path $env:SystemDrive "Python27"
-$LIB_DIR        = Join-Path $PYTHON_DIR "lib\site-packages"
-$BUILD_DIR      = Join-Path $OPENSTACK_DIR "build"
-$INSTANCES_DIR  = Join-Path $OPENSTACK_DIR "Instances"
-$BIN_DIR        = Join-Path $OPENSTACK_DIR "bin"
-$CONFIG_DIR     = Join-Path $OPENSTACK_DIR "etc"
-$LOG_DIR        = Join-Path $OPENSTACK_DIR "log"
-$SERVICE_DIR    = Join-Path $OPENSTACK_DIR "service"
-$FILES_DIR      = Join-Path ${env:CHARM_DIR} "files"
-$OVS_DIR        = "${env:ProgramFiles}\Cloudbase Solutions\Open vSwitch"
-$OVS_VSCTL      = Join-Path $OVS_DIR "bin\ovs-vsctl.exe"
-$env:OVS_RUNDIR = Join-Path $env:ProgramData "openvswitch"
-$OVS_EXT_NAME   = "Open vSwitch Extension"
-$INTERFACES_TEMPLATE = Join-Path $CONFIG_DIR "interfaces.template"
-$POLICY_FILE = Join-Path $CONFIG_DIR "policy.json"
-$MKISO_EXE = Join-Path $BIN_DIR "mkisofs.exe"
-$QEMU_IMG_EXE = Join-Path $BIN_DIR "qemu-img.exe"
+$OPENSTACK_DIR          = Join-Path $env:SystemDrive "OpenStack"
+$PYTHON_DIR             = Join-Path $env:SystemDrive "Python27"
+$LIB_DIR                = Join-Path $PYTHON_DIR "lib\site-packages"
+$BUILD_DIR              = Join-Path $OPENSTACK_DIR "build"
+$INSTANCES_DIR          = Join-Path $OPENSTACK_DIR "Instances"
+$BIN_DIR                = Join-Path $OPENSTACK_DIR "bin"
+$CONFIG_DIR             = Join-Path $OPENSTACK_DIR "etc"
+$LOG_DIR                = Join-Path $OPENSTACK_DIR "log"
+$SERVICE_DIR            = Join-Path $OPENSTACK_DIR "service"
+$FILES_DIR              = Join-Path ${env:CHARM_DIR} "files"
+$OVS_DIR                = "${env:ProgramFiles}\Cloudbase Solutions\Open vSwitch"
+$OVS_VSCTL              = Join-Path $OVS_DIR "bin\ovs-vsctl.exe"
+$env:OVS_RUNDIR         = Join-Path $env:ProgramData "openvswitch"
+$OVS_EXT_NAME           = "Open vSwitch Extension"
+$INTERFACES_TEMPLATE    = Join-Path $CONFIG_DIR "interfaces.template"
+$POLICY_FILE            = Join-Path $CONFIG_DIR "policy.json"
+$MKISO_EXE              = Join-Path $BIN_DIR "mkisofs.exe"
+$QEMU_IMG_EXE           = Join-Path $BIN_DIR "qemu-img.exe"
 
 function Get-TemplatesDir {
     return (Join-Path (Get-JujuCharmDir) "templates")
@@ -69,7 +69,8 @@ function Get-SystemContext {
         "qemu_img_exe"        = $QEMU_IMG_EXE;
         "compute_driver"      = Get-ComputeDriver
         "vswitch_name"        = Get-JujuVMSwitchName
-        "local_ip"            = (Get-CharmState -Namespace "novahyperv" -Key "local_ip");
+        "local_ip"            = (Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip");
+        "cores_count"         = (Get-WmiObject -Class Win32_ComputerSystem | select -ExpandProperty "NumberOfLogicalProcessors")
         "etc_directory"       = $CONFIG_DIR;
         "bin_directory"       = $BIN_DIR;
     }
@@ -204,41 +205,7 @@ function Get-PackagePath {
 }
 
 
-# Installs a package after it is downloaded from the Internet and checked for
-# integrity with SHA1 checksum. Accepts as parameters: an URL, an optional
-# 'Checksum' with its 'HashingAlgorithm' and 'ArgumentList' which can be passed
-# if the installer requires unattended installation.
-# Supported packages formats are: '.exe' and '.msi'
-function Install-Package {
-    Param(
-        [string]$URL,
-        [string]$Checksum="",
-        [string]$HashingAlgorithm="",
-        [array]$ArgumentList
-    )
-
-    Write-JujuLog "Installing package '$URL'"
-
-    $packageFormat = $URL.Split('.')[-1]
-    $acceptedFormats = @('msi', 'exe')
-    if ($packageFormat -notin $acceptedFormats) {
-        Throw ("Cannot install the package found at this URL: $URL " +
-               "Unsupported installer format.")
-    }
-
-    $installerPath = Get-PackagePath $URL $Checksum $HashingAlgorithm
-    $stat = Start-Process -FilePath $installerPath -ArgumentList $ArgumentList `
-                          -PassThru -Wait
-    if ($stat.ExitCode -ne 0) {
-        throw "Package '$URL' failed to install."
-    }
-    Remove-Item $installerPath
-
-    Write-JujuLog "Finished installing package."
-}
-
-
-function Start-GitClonePull {
+function GitClonePull {
     Param(
         [string]$Path,
         [string]$URL,
@@ -248,28 +215,16 @@ function Start-GitClonePull {
     $projectDir = $Path
     $gitPath = Join-Path $projectDir ".git"
 
-    if (!(Test-Path -Path $Path) -or !(Test-Path $gitPath)) {
+    if (Test-Path -Path $Path) {
         rm $path -Recurse -Force -ErrorAction SilentlyContinue
-        Start-ExecuteWithRetry {
-            Start-ExternalCommand -ScriptBlock { 
-                    git clone $URL $Path
-                    git -C $Path checkout $Branch
-                } `
-                        -ErrorMessage "Git clone failed"
-        }
-    } 
-    else {
-        Get-ChildItem -Path $Path -Include *.pyc -Recurse | foreach ($_) { Remove-Item $_.fullname }
-        Start-ExecuteWithRetry {
-            Start-ExternalCommand -ScriptBlock {
-                    git -C $Path checkout $Branch 
-                    git -C $Path reset --hard
-                    git -C $Path clean -f -d
-                    git -C $Path pull
-                } `
-                        -ErrorMessage "Git checkout failed"
-        }
-    }   
+    }
+    Start-ExecuteWithRetry {
+        Start-ExternalCommand -ScriptBlock { 
+                git clone $URL $Path
+                git -C $Path checkout $Branch
+            } `
+                    -ErrorMessage "Git clone failed"
+    }
 }
 
 
@@ -283,12 +238,10 @@ function Install-OpenStackProjectFromRepo {
 }
 
 
-function Start-GerritGitPrep {
+function GerritGitPrep {
     Param(
         [Parameter(Mandatory=$True)]
         [string]$ZuulUrl,
-        [Parameter(Mandatory=$True)]
-        [string]$GerritSite,
         [Parameter(Mandatory=$True)]
         [string]$ZuulRef,
         [Parameter(Mandatory=$True)]
@@ -305,14 +258,11 @@ function Start-GerritGitPrep {
     if (!$ZuulUrl) {
         Throw "The zuul site name (eg 'http://zuul.openstack.org/p') must be the first argument."
     }
-    if (!$GerritSite) {
-        Throw "The gerrit site name (eg 'https://review.openstack.org') must be the second argument."
-    }
     if (!$GitOrigin -or !$ZuulNewrev) {
-        $GitOrigin="$GerritSite/p"
+        $GitOrigin="$ZuulUrl"
     }
 
-    Write-JujuLog "Triggered by: $GerritSite/$ZuulChange"
+    Write-JujuLog "Triggered by: $ZuulUrl/$ZuulChange"
 
     if (!(Test-Path -Path $BUILD_DIR -PathType Container)) {
         mkdir $BUILD_DIR
@@ -413,9 +363,10 @@ function Start-GerritGitPrep {
 }
 
 
-function Install-Projects ($buildFor) {
+function Install-Projects ($project) {
     # Shared for all projects
-    $projectDir = $buildFor -replace 'openstack/'
+    #$projectDir = $buildFor -replace 'openstack/'
+    $projectDir = Split-Path -Path $project -Leaf
     Write-JujuLog "Installing $projectDir"
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
     Start-ExecuteWithRetry {
@@ -424,17 +375,17 @@ function Install-Projects ($buildFor) {
     
     # Individual projects
     # Nova
-    if ($buildFor -eq "openstack/nova") {
-        Invoke-BuildNova
+    if ($project -eq "openstack/nova") {
+        CopyNovaDefaultConfs
     }
     # Networking-Hyperv
-    if ($buildFor -eq "openstack/networking-hyperv") {
-        Invoke-BuildNeutron
+    if ($project -eq "openstack/networking-hyperv") {
+        CheckNeutronHypervBin
     }
 }
 
 
-function Invoke-BuildNova {
+function CopyNovaDefaultConfs {
     $novaBin = (Get-CharmServices)['nova']['binary']
     if (!(Test-Path $novaBin)) {
        Throw "$novaBin was not found."
@@ -451,7 +402,7 @@ function Invoke-BuildNova {
 }
 
 
-function Invoke-BuildNeutron {
+function CheckNeutronHypervBin {
     $neutronBin = (Get-CharmServices)['neutron']['binary']
     if (!(Test-Path $neutronBin)) {
         Throw "$neutronBin was not found."
@@ -625,10 +576,10 @@ function Enable-OVS {
 
 
 function Ensure-InternalOVSInterfaces {
-    $ifIndex = Get-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex"
-    $lip = Get-CharmState -Namespace "novahyperv" -Key "local_ip"
+    $ifIndex = Get-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex"
+    $lip = Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip"
     $ifName = (Get-NetAdapter -ifindex $ifIndex).Name
-    $lip_mask = Get-CharmState -Namespace "novahyperv" -Key "local_ip_mask"
+    $lip_mask = Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip_mask"
 
     Invoke-JujuCommand -Command @($ovs_vsctl, "--may-exist", "add-br", "juju-br")
     Invoke-JujuCommand -Command @($ovs_vsctl, "--may-exist", "add-port", "juju-br", $ifName)
@@ -637,7 +588,7 @@ function Ensure-InternalOVSInterfaces {
     Enable-NetAdapter -Name "juju-br" -Confirm:$false
 
     New-NetIPAddress -interfacealias "juju-br" -AddressFamily "ipv4" -IPAddress $lip -PrefixLength $lip_mask
-    Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $lip
+    Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip" -Value $lip
     return
 }
  
@@ -658,17 +609,17 @@ function Get-CherryPicksObject {
     $validProjects = @('nova', 'networking-hyperv', 'neutron', 'compute-hyperv', 'os-win')
     foreach ($item in $splitCfgOption) {
         $splitItem = $item.Split('|')
-        if ($splitItem.Count -ne 4) {
+        if ($splitItem.Count -ne 3) {
             Throw "ERROR: Wrong 'cherry-picks' config option format"
         }
-        $projectName = $splitItem[0]
+        $projectName = Split-Path -Path $splitItem[0] -Leaf
         if ($projectName -notin $validProjects) {
             Throw "ERROR: Invalid git project name '$projectName'"
         }
         $ret[$projectName] += @{
-            'git_url' = $splitItem[1];
-            'branch_name' = $splitItem[2];
-            'commit_id' = $splitItem[3]
+            'git_url' = $splitItem[0];
+            'branch_ref' = $splitItem[1];
+            'branch' = $splitItem[2]
         }
     }
     return $ret
@@ -684,20 +635,27 @@ function Initialize-GitRepository {
     )
 
     Write-JujuLog "Cloning $GitURL from $BranchName"
-    Start-ExecuteWithRetry { Start-GitClonePull $BuildFolder $GitURL $BranchName }
+    Start-ExecuteWithRetry { GitClonePull $BuildFolder $GitURL $BranchName }
     foreach ($commit in $CherryPicks) {
         Write-JujuLog ("Cherry-picking commit {0} from {1}, branch {2}" -f
-                       @($commit['commit_id'], $commit['git_url'], $commit['branch_name']))
+                       @($commit['branch_ref'], $commit['git_url'], $commit['branch']))
+        if ($commit['branch'] -ne $BranchName) {
+            Write-JujuWarning "The cherry-pick patch is not in branch $BranchName. Not running cherry-pick."
+            return
+        }
         try {
-            Start-ExternalCommand {
-                git -C $BuildFolder fetch $commit['git_url'] $commit['branch_name']
-                git -C $BuildFolder cherry-pick $commit['commit_id']
+            Start-ExternalCommand -ScriptBlock {
+                git -C $BuildFolder fetch $commit['git_url'] $commit['branch_ref']
+                git -C $BuildFolder cherry-pick FETCH_HEAD
             }
         }
         catch {
-            # If the same cherry-pick is applied twice it will error.
-            # This catch is made so the hook will not fail on that error.
-            Write-JujuWarning "Git cherry-pick has errored. This is probably because you are trying to cherry-pick the already applied patch."
+            # If cherry-pick fails return to previous state.
+            Write-JujuWarning ("Cherry-pick for {0} failed. Reverting to the previous state.Error: $_" -f
+                              @($commit['branch_ref']))
+            Start-ExternalCommand -ScriptBlock {
+                git cherry-pick --abort
+            }
         }
     }
 }
@@ -713,34 +671,32 @@ function Initialize-GitRepositories {
 
     Write-JujuLog "Cloning the required Git repositories"
     
-    $standardProjects = 'openstack/nova', 'openstack/neutron', 'openstack/os-win'
     $cherryPicks = Get-CherryPicksObject
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
     if ($NetworkType -eq 'hyperv') {
         if ($BuildFor -ne "openstack/networking-hyperv") {
-            Initialize-GitRepository "$openstackBuild\networking-hyperv" $NETWORKING_HYPERV_GIT "master" $cherryPicks['networking-hyperv']
+            Start-ExecuteWithRetry {
+                Initialize-GitRepository "$openstackBuild\networking-hyperv" $NETWORKING_HYPERV_GIT "master" $cherryPicks['networking-hyperv']
+            }
         }
     }
 
-    if ($BuildFor -eq "openstack/nova") {
-        Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
-        Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
-    }
-
-    if ($BuildFor -eq "openstack/neutron") {
-        Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
-        Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
+    if ($BuildFor -ne "openstack/nova") {
+        Start-ExecuteWithRetry {
+            Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
+        }
     }
     
-    if ($BuildFor -eq "openstack/os-win") {
-        Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
-        Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
+    if ($BuildFor -ne "openstack/neutron") {
+        Start-ExecuteWithRetry {
+            Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
+        }
     }
     
-    if ($BuildFor -notin $standardProjects) {
-        Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
-        Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
-        Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
+    if ($BuildFor -ne "openstack/os-win") {
+        Start-ExecuteWithRetry {
+            Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
+        }
     }
 }
 
@@ -928,8 +884,8 @@ function Get-DataPortFromDataNetwork {
         return $false
     }
 
-    $local_ip = Get-CharmState -Namespace "novahyperv" -Key "local_ip"
-    $ifIndex = Get-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex"
+    $local_ip = Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip"
+    $ifIndex = Get-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex"
 
     if($local_ip -and $ifIndex){
         if((Confirm-LocalIP -IPaddress $ifIndex -ifIndex $ifIndex)){
@@ -957,9 +913,9 @@ function Get-DataPortFromDataNetwork {
         $network = Get-NetworkAddress $i.IPv4Address $decimalMask
         Write-JujuInfo ("Network address for {0} is {1}" -f @($i.IPAddress, $network))
         if ($network -eq $netDetails[0]){
-            Set-CharmState -Namespace "novahyperv" -Key "local_ip_mask" -Value $i.PrefixLength
-            Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $i.IPAddress
-            Set-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex" -Value $i.IfIndex
+            Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip_mask" -Value $i.PrefixLength
+            Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip" -Value $i.IPAddress
+            Set-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex" -Value $i.IfIndex
             return Get-NetAdapter -ifindex $i.IfIndex
         }
     }
@@ -1006,9 +962,9 @@ function Get-OVSDataPort {
         if(!$local_ip){
             Throw "failed to get fallback adapter IP address"
         }
-        Set-CharmState -Namespace "novahyperv" -Key "local_ip_mask" -Value $i.PrefixLength
-        Set-CharmState -Namespace "novahyperv" -Key "local_ip" -Value $local_ip[0]
-        Set-CharmState -Namespace "novahyperv" -Key "dataNetworkIfindex" -Value $port.IfIndex
+        Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip_mask" -Value $i.PrefixLength
+        Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip" -Value $local_ip[0]
+        Set-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex" -Value $port.IfIndex
     }
 
     return Get-RealInterface $port
@@ -1036,7 +992,7 @@ function Get-DataPort {
 }
 
 
-function Start-ConfigureVMSwitch {
+function ConfigureVMSwitch {
     $VMswitchName = Get-JujuVMSwitchName
     $vmswitch = Get-VMSwitch -SwitchType External -Name $VMswitchName -ErrorAction SilentlyContinue
 
@@ -1127,12 +1083,13 @@ function Install-PipDependencies {
     Write-JujuLog "Installing pip dependencies"
     $pythonPkgs = Get-JujuCharmConfig -Scope 'extra-python-packages'
     if ($pythonPkgs) {
+        $pkgsTXT = Join-Path $env:TEMP 'extrapypkg.txt'
         $pythonPkgsArr = $pythonPkgs.Split()
-        foreach ($pythonPkg in $pythonPkgsArr) {
-            Write-JujuLog "Installing $pythonPkg"
-            Start-ExternalCommand -ScriptBlock { pip install -U $pythonPkg } `
-                                    -ErrorMessage "Failed to install $pythonPkg"
-        }
+        Set-Content -Path $pkgsTXT -Value $pythonPkgsArr
+        Write-JujuLog "Installing $pythonPkgsArr"
+        Start-ExternalCommand -ScriptBlock { pip install -r $pkgsTXT } `
+                                -ErrorMessage "Failed to install extra python packages"
+        Remove-Item -Force -Path $pkgsTXT
     }
 }
 
@@ -1267,8 +1224,12 @@ function Join-ADDomain {
     $adCtx = Get-ActiveDirectoryContext
     if (Confirm-IsInDomain $adCtx["domainName"]) {
         # Add AD user to local Administrators group
-        Grant-PrivilegesOnDomainUser $adCtx['adcredentials'][0]['username']
-        Enable-LiveMigration
+        Start-ExecuteWithRetry -ScriptBlock {
+            Grant-PrivilegesOnDomainUser $adCtx['adcredentials'][0]['username']
+        }
+            Start-ExecuteWithRetry -ScriptBlock {
+            Enable-LiveMigration
+        }
     }
     else {
         Start-JoinDomain
@@ -1295,7 +1256,7 @@ function Enable-LiveMigration {
 
 # HOOKS FUNCTIONS
 
-function Start-InstallHook {
+function Invoke-InstallHook {
     # Set machine to use high performance settings.
     try {
         Set-PowerProfile -PowerProfile Performance
@@ -1343,8 +1304,7 @@ function Start-InstallHook {
     $msiscsi_service.ChangeStartMode("Automatic")
     $msiscsi_service.StartService()
 
-    Import-CloudbaseCert
-    Start-ConfigureVMSwitch
+    ConfigureVMSwitch
     Write-PipConfigFile
 
     # Install Git
@@ -1385,8 +1345,7 @@ function Start-InstallHook {
         $zuulProject = "none"
     }
     else {
-        $gerritSite = $zuulUrl.Trim('/p')
-        Start-GerritGitPrep -ZuulUrl $zuulUrl -GerritSite $gerritSite -ZuulRef $zuulRef `
+        GerritGitPrep -ZuulUrl $zuulUrl -ZuulRef $zuulRef `
                             -ZuulChange $zuulChange -ZuulProject $zuulProject
     }
     
@@ -1407,7 +1366,7 @@ function Start-InstallHook {
 }
 
 
-function Start-ADRelationJoinedHook {
+function Invoke-ADRelationJoinedHook {
     $hypervADUser = Get-HypervADUser
     $userGroup = @{$hypervADUser = @("CN=Users")}
     $encUserGroup = Get-MarshaledObject $userGroup
@@ -1429,7 +1388,7 @@ function Start-ADRelationJoinedHook {
 }
 
 
-function Start-RelationHooks {
+function Invoke-RelationHooks {
     $charmServices = Get-CharmServices
     $networkType = Get-JujuCharmConfig -Scope 'network-type'
     if ($networkType -eq "hyperv") {
@@ -1455,6 +1414,16 @@ function Start-RelationHooks {
     if (!$devstackCtx.Count -or !$adCtx.Count) {
         Write-JujuLog ("Both AD context and DevStack context must be complete " +
                        "before starting the OpenStack services.")
+        if (!$adCtx.Count -and !$devstackCtx.Count){
+            $msg = "Waiting on AD and DevStack relations."
+        }
+        elseif (!$adCtx.Count) {
+            $msg = "Waiting on AD relation."
+        }
+        else {
+            $msg = "Waiting on DevStack relation."
+        }
+        Set-JujuStatus -Status blocked -Message $msg
     }
     else {
         # Create services and write configs.
