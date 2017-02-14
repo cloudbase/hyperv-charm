@@ -41,10 +41,10 @@ function Grant-PrivilegesOnDomainUser {
         [string]$Username
     )
 
-    Grant-Privilege $Username SeServiceLogonRight
-
     $administratorsGroupSID = "S-1-5-32-544"
     Add-UserToLocalGroup -Username $Username -GroupSID $administratorsGroupSID
+    
+    Grant-Privilege $Username SeServiceLogonRight
 }
 
 function Get-NewCimSession {

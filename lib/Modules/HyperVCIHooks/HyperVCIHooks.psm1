@@ -222,8 +222,7 @@ function GitClonePull {
         Start-ExternalCommand -ScriptBlock { 
                 git clone $URL $Path
                 git -C $Path checkout $Branch
-            } `
-                    -ErrorMessage "Git clone failed"
+            }
     }
 }
 
@@ -292,8 +291,7 @@ function GerritGitPrep {
         Start-ExternalCommand {
                 git -C $projectDir gc
                 git -C $projectDir remote update
-            } `
-                    -ErrorMessage "Failed to update remote"
+            }
     }
 
     Start-ExternalCommand { git -C $projectDir reset --hard } -ErrorMessage "Failed to git reset"
@@ -318,23 +316,20 @@ function GerritGitPrep {
                 git -C $projectDir fetch --tags "$ZuulUrl/$ZuulProject"
                 git -C $projectDir checkout $ZuulRef
                 git -C $projectDir reset --hard $ZuulRef
-            } `
-                    -ErrorMessage "Failed to fetch tags from: $ZuulUrl/$ZuulProject"
+            }
     }
     elseif (!$ZuulNewrev) {
         Start-ExternalCommand {
                 git -C $projectDir fetch "$ZuulUrl/$ZuulProject" $ZuulRef
                 git -C $projectDir checkout FETCH_HEAD
                 git -C $projectDir reset --hard FETCH_HEAD
-            } `
-                    -ErrorMessage "Failed to fetch: $ZuulUrl/$ZuulProject $ZuulRef"
+            }
     }
     else {
         Start-ExternalCommand {
                 git -C $projectDir checkout $ZuulNewrev
                 git -C $projectDir reset --hard $ZuulNewrev
-            } `
-                    -ErrorMessage "Failed to checkout $ZuulNewrev"
+            }
     }
 
     try {
@@ -349,8 +344,7 @@ function GerritGitPrep {
                 git -C $projectDir submodule init
                 git -C $projectDir submodule sync
                 git -C $projectDir submodule update --init
-            } `
-                    -ErrorMessage "Failed to init submodule"
+            }
     }
 
     echo "Final result:"
@@ -376,6 +370,7 @@ function Install-Projects ($project) {
     # Individual projects
     # Nova
     if ($project -eq "openstack/nova") {
+        CheckNovaHypervBin
         CopyNovaDefaultConfs
     }
     # Networking-Hyperv
@@ -385,12 +380,15 @@ function Install-Projects ($project) {
 }
 
 
-function CopyNovaDefaultConfs {
+function CheckNovaHypervBin {
     $novaBin = (Get-CharmServices)['nova']['binary']
     if (!(Test-Path $novaBin)) {
        Throw "$novaBin was not found."
     }
+}
 
+
+function CopyNovaDefaultConfs {
     Write-JujuLog "Copying default config files"
     $defaultConfigFiles = @('rootwrap.d', 'api-paste.ini', 'cells.json',
                                 'rootwrap.conf')
@@ -445,13 +443,12 @@ function Install-OVS {
     )
 
     Write-JujuInfo "Running OVS install"
-    $ovs = Get-ManagementObject -Class Win32_Product | Where-Object {$_.Name -match "open vswitch"}
-    if ($ovs){
+    $ovs_name = "open vswitch"
+    if (Get-ComponentIsInstalled -Name $ovs_name){
         Write-JujuInfo "OVS is already installed"
         return $true
     }
 
-    $hasInstaller = Test-Path $InstallerPath
     if(!(Test-Path $InstallerPath)){
         $InstallerPath = Get-OVSInstaller
     }
@@ -675,28 +672,20 @@ function Initialize-GitRepositories {
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
     if ($NetworkType -eq 'hyperv') {
         if ($BuildFor -ne "openstack/networking-hyperv") {
-            Start-ExecuteWithRetry {
                 Initialize-GitRepository "$openstackBuild\networking-hyperv" $NETWORKING_HYPERV_GIT "master" $cherryPicks['networking-hyperv']
-            }
         }
     }
 
     if ($BuildFor -ne "openstack/nova") {
-        Start-ExecuteWithRetry {
             Initialize-GitRepository "$openstackBuild\nova" $NOVA_GIT $BranchName $cherryPicks['nova']
-        }
     }
     
     if ($BuildFor -ne "openstack/neutron") {
-        Start-ExecuteWithRetry {
             Initialize-GitRepository "$openstackBuild\neutron" $NEUTRON_GIT $BranchName $cherryPicks['neutron']
-        }
     }
     
     if ($BuildFor -ne "openstack/os-win") {
-        Start-ExecuteWithRetry {
             Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
-        }
     }
 }
 
@@ -748,26 +737,6 @@ function Initialize-Environment {
     Write-JujuLog "Environment initialization done."
 }
 
-function Set-ServiceAcountCredentials {
-    Param(
-        [string]$ServiceName,
-        [string]$ServiceUser,
-        [string]$ServicePassword
-    )
-
-    $filter = "Name='{0}'" -f $ServiceName
-    #$filter = 'Name=' + "'" + $ServiceName + "'" + ''
-    $service = Get-WMIObject -Namespace "root\cimv2" -Class Win32_Service -Filter $filter
-    $service.StopService()
-    while ($service.Started) {
-        Start-Sleep -Seconds 2
-        $service = Get-WMIObject -Namespace "root\cimv2" -Class Win32_Service -Filter $filter
-    }
-
-    Grant-Privilege $ServiceUser "SeServiceLogonRight"
-    Set-ServiceLogon -Services @($ServiceName) -UserName $ServiceUser -Password $ServicePassword
-}
-
 
 function New-OpenStackService {
     Param(
@@ -780,7 +749,6 @@ function New-OpenStackService {
     )
 
     $filter = "Name='{0}'" -f $ServiceName
-    #$filter='Name=' + "'" + $ServiceName + "'"
 
     $service = Get-WmiObject -Namespace "root\cimv2" -Class Win32_Service -Filter $filter
     if($service) {
@@ -800,7 +768,7 @@ function New-OpenStackService {
         Stop-Service $ServiceName
     }
 
-    Set-ServiceAcountCredentials $ServiceName $ServiceUser $ServicePassword
+    Set-ServiceLogon -Services @($ServiceName) -UserName $ServiceUser -Password $ServicePassword
 }
 
 
@@ -1224,12 +1192,10 @@ function Join-ADDomain {
     $adCtx = Get-ActiveDirectoryContext
     if (Confirm-IsInDomain $adCtx["domainName"]) {
         # Add AD user to local Administrators group
-        Start-ExecuteWithRetry -ScriptBlock {
-            Grant-PrivilegesOnDomainUser $adCtx['adcredentials'][0]['username']
-        }
-            Start-ExecuteWithRetry -ScriptBlock {
+            Start-ExecuteWithRetry {
+                Grant-PrivilegesOnDomainUser -Username $adCtx['adcredentials'][0]['username']
+            }
             Enable-LiveMigration
-        }
     }
     else {
         Start-JoinDomain
