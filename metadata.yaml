@@ -1,6 +1,8 @@
 name: hyper-v-ci
 summary: Hyper-V charm for CI
-maintainer: Ionut Balutoiu <ibalutoiu@cloudbasesolutions.com>
+maintainers: 
+    - "Ionut Balutoiu <ibalutoiu@cloudbasesolutions.com>"
+    - "Mihai Gheorghe <mgheorghe@cloudbasesolutions.com>"
 description: Hyper-V charm for CI
 tags:
   - windows

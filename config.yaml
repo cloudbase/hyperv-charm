@@ -93,7 +93,7 @@ options:
     type: string
     description: "Extra python packages to install."
   administrator-password:
-    default: "Passw0rd"
+    default: ""
     type: string
     description: |
       The password for the Administrator account. It must contain atleast
@@ -117,7 +117,7 @@ options:
       URL used to download git for Windows. Optionally, a checksum supported
       by the 'Get-FileHash' PowerShell cmdlet can be provided to check file
       integrity.
-      Syntax is: "<url>#<hash_algorithm><checksum>"
+      Syntax is: "<url>#<hash_algorithm>=<checksum>"
   python27-url:
     type: string
     default: "https://www.python.org/ftp/python/2.7.10/python-2.7.10.msi"
@@ -125,7 +125,7 @@ options:
       URL used to download Python 2.7.x for Windows. Optionally, a checksum
       supported by the 'Get-FileHash' PowerShell cmdlet can be provided to
       check file integrity.
-      Syntax is: "<url>#<hash_algorithm><checksum>"
+      Syntax is: "<url>#<hash_algorithm>=<checksum>"
   enable-freerdp-console:
     type: boolean
     default: True
@@ -139,7 +139,7 @@ options:
       URL used to download Visual C++ 2012 x86 runtime. Optionally, a checksum
       supported by the 'Get-FileHash' PowerShell cmdlet can be provided to
       check file integrity.
-      Syntax is: "<url>#<hash_algorithm><checksum>"
+      Syntax is: "<url>#<hash_algorithm>=<checksum>"
   pip-version:
     type: string
     default: ""

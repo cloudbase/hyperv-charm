@@ -8,54 +8,18 @@ Import-Module JujuUtils
 Import-Module JujuHooks
 Import-Module JujuLogging
 Import-Module JujuHelper
+Import-Module CICommon
 Import-Module JujuWindowsUtils
+Import-Module HyperVNetworking
+Import-Module OVSCharmUtils
 Import-Module ADCharmUtils
 Import-Module Templating
 
-$NEUTRON_GIT           = "https://github.com/openstack/neutron.git"
-$NOVA_GIT              = "https://github.com/openstack/nova.git"
-$NETWORKING_HYPERV_GIT = "https://github.com/openstack/networking-hyperv.git"
-$COMPUTE_HYPERV_GIT    = "https://github.com/openstack/compute-hyperv.git"
-$OSWIN_GIT             = "https://git.openstack.org/openstack/os-win.git"
 
-$OPENSTACK_DIR          = Join-Path $env:SystemDrive "OpenStack"
-$PYTHON_DIR             = Join-Path $env:SystemDrive "Python27"
-$LIB_DIR                = Join-Path $PYTHON_DIR "lib\site-packages"
-$BUILD_DIR              = Join-Path $OPENSTACK_DIR "build"
-$INSTANCES_DIR          = Join-Path $OPENSTACK_DIR "Instances"
-$BIN_DIR                = Join-Path $OPENSTACK_DIR "bin"
-$CONFIG_DIR             = Join-Path $OPENSTACK_DIR "etc"
-$LOG_DIR                = Join-Path $OPENSTACK_DIR "log"
-$SERVICE_DIR            = Join-Path $OPENSTACK_DIR "service"
-$FILES_DIR              = Join-Path ${env:CHARM_DIR} "files"
-$OVS_DIR                = "${env:ProgramFiles}\Cloudbase Solutions\Open vSwitch"
-$OVS_VSCTL              = Join-Path $OVS_DIR "bin\ovs-vsctl.exe"
-$env:OVS_RUNDIR         = Join-Path $env:ProgramData "openvswitch"
-$OVS_EXT_NAME           = "Open vSwitch Extension"
-$INTERFACES_TEMPLATE    = Join-Path $CONFIG_DIR "interfaces.template"
-$POLICY_FILE            = Join-Path $CONFIG_DIR "policy.json"
-$MKISO_EXE              = Join-Path $BIN_DIR "mkisofs.exe"
-$QEMU_IMG_EXE           = Join-Path $BIN_DIR "qemu-img.exe"
+
 
 function Get-TemplatesDir {
     return (Join-Path (Get-JujuCharmDir) "templates")
-}
-
-
-function Get-DevStackContext {
-    $requiredCtx =  @{
-        "devstack_ip" = $null;
-        "password"    = $null;
-        "rabbit_user" = $null;
-    }
-    $ctx = Get-JujuRelationContext -Relation 'devstack' -RequiredContext $requiredCtx
-
-    # Required context not found
-    if(!$ctx.Count) {
-        return @{}
-    }
-
-    return $ctx
 }
 
 
@@ -68,8 +32,8 @@ function Get-SystemContext {
         "log_directory"       = $LOG_DIR;
         "qemu_img_exe"        = $QEMU_IMG_EXE;
         "compute_driver"      = Get-ComputeDriver
-        "vswitch_name"        = Get-JujuVMSwitchName
-        "local_ip"            = (Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip");
+        "vswitch_name"        = Get-VMSwitchName
+        "local_ip"            = Get-JujuUnitPrivateIP;
         "cores_count"         = (Get-WmiObject -Class Win32_ComputerSystem | select -ExpandProperty "NumberOfLogicalProcessors")
         "etc_directory"       = $CONFIG_DIR;
         "bin_directory"       = $BIN_DIR;
@@ -84,16 +48,18 @@ function Get-CharmServices {
             'description'  = "OpenStack nova Compute Service";
             'binary' = Join-Path $PYTHON_DIR "Scripts\nova-compute.exe";
             'config' = Join-Path $CONFIG_DIR "nova.conf";
-            'template' = Join-Path (Get-TemplatesDir) "nova.conf";
+            'template' = "nova.conf";
             'service_name' = 'nova-compute';
             "context_generators" = @(
                 @{
-                    "generator" = "Get-DevStackContext";
+                    "generator" = (Get-Item "function:Get-DevStackContext").ScriptBlock;
                     "relation"  = "devstack";
+                    "mandatory" = $true;
                 },
                 @{
-                    "generator" = "Get-SystemContext";
+                    "generator" = (Get-Item "function:Get-SystemContext").ScriptBlock;
                     "relation"  = "system";
+                    "mandatory" = $true;
                 }
             );
         };
@@ -101,16 +67,18 @@ function Get-CharmServices {
             'description' = "OpenStack Neutron Hyper-V Agent Service";
             'binary' = (Join-Path $PYTHON_DIR "Scripts\neutron-hyperv-agent.exe");
             'config' = (Join-Path $CONFIG_DIR "neutron_hyperv_agent.conf");
-            'template' = Join-Path (Get-TemplatesDir) "neutron_hyperv_agent.conf";
+            'template' = "neutron_hyperv_agent.conf";
             'service_name' = "neutron-hyperv-agent";
             "context_generators" = @(
                 @{
-                    "generator" = "Get-DevStackContext";
+                    "generator" = (Get-Item "function:Get-DevStackContext").ScriptBlock;
                     "relation"  = "devstack";
+                    "mandatory" = $true;
                 },
                 @{
-                    "generator" = "Get-SystemContext";
+                    "generator" = (Get-Item "function:Get-SystemContext").ScriptBlock;
                     "relation"  = "system";
+                    "mandatory" = $true;
                 }
             );
         };
@@ -118,72 +86,24 @@ function Get-CharmServices {
             'description' = "OpenStack Neutron Open vSwitch Agent Service";
             'binary' = (Join-Path $PYTHON_DIR "Scripts\neutron-openvswitch-agent.exe");
             'config' = (Join-Path $CONFIG_DIR "ml2_conf.ini");
-            'template' = Join-Path (Get-TemplatesDir) "ml2_conf.ini";
+            'template' = "ml2_conf.ini";
             'service_name' = "neutron-openvswitch-agent";
             "context_generators" = @(
                 @{
-                    "generator" = "Get-DevStackContext";
+                    "generator" = (Get-Item "function:Get-DevStackContext").ScriptBlock;
                     "relation"  = "devstack";
+                    "mandatory" = $true;
                 },
                 @{
-                    "generator" = "Get-SystemContext";
+                    "generator" = (Get-Item "function:Get-SystemContext").ScriptBlock;
                     "relation"  = "system";
+                    "mandatory" = $true;
                 }
             );
         }
     }
     return $services
 }
-
-
-function Write-ConfigFile {
-    param (
-        [Parameter(Mandatory=$true)]
-        [string]$ServiceName
-    )
-    $JujuCharmServices = Get-CharmServices
-    $should_restart = $true
-    $service = $JujuCharmServices[$ServiceName]
-    if (!$service){
-        Write-JujuWarning "No such service $ServiceName. Not generating config"
-        return $false
-    }
-    
-    # populate config with variables from context
-    
-    $incompleteContexts = [System.Collections.Generic.List[object]](New-Object "System.Collections.Generic.List[object]")
-    $mergedContext = [System.Collections.Generic.Dictionary[string, object]](New-Object "System.Collections.Generic.Dictionary[string, object]")
-    
-    foreach ($context in $service['context_generators']){
-        Write-JujuInfo ("Getting context for {0}" -f $context["relation"])
-        $ctx = & $context["generator"]
-        if (!$ctx.Count){
-            # Context is empty. Probably peer not ready
-            Write-JujuWarning "Context for $context is EMPTY"
-            $incompleteContexts.Add($context["relation"])
-            $should_restart = $false
-            continue
-        }
-        Write-JujuInfo ("Got {0} context: {1}" -f @($context["relation"], $ctx.Keys))
-        foreach ($val in $ctx.Keys) {
-            $mergedContext[$val] = $ctx[$val]
-        }
-    }
-    
-    if ($incompleteContexts){
-        $msg = "Incomplete relations: {0}" -f @($incompleteContexts -join ', ')
-        Set-JujuStatus -Status blocked -Message $msg
-    } 
-    else {
-        Set-JujuStatus -Status active -Message "Unit is ready"
-    }
-    # Any variables not available in context we remove
-    $config = Invoke-RenderTemplateFromFile -Template $service["template"] -Context $mergedContext
-    Set-Content $service["config"] $config
-    # Restart-Service $service["service"]
-    return $should_restart
-}
-
 
 # Returns the full path of the package after it is downloaded using
 # the URL parameter (a checksum may optionally be specified). The
@@ -224,16 +144,6 @@ function GitClonePull {
                 git -C $Path checkout $Branch
             }
     }
-}
-
-
-function Install-OpenStackProjectFromRepo {
-    Param(
-        [string]$ProjectPath
-    )
-
-    Start-ExternalCommand -ScriptBlock { pip install -e $ProjectPath } `
-                          -ErrorMessage "Failed to install $ProjectPath from repo."
 }
 
 
@@ -357,9 +267,21 @@ function GerritGitPrep {
 }
 
 
-function Install-Projects ($project) {
+function Install-OpenStackProjectFromRepo {
+    Param(
+        [string]$ProjectPath
+    )
+
+    Start-ExternalCommand -ScriptBlock { pip install -e $ProjectPath } `
+                          -ErrorMessage "Failed to install $ProjectPath from repo."
+}
+
+
+function Install-OpenstackProject {
+    Param(
+        [String]$Project
+    )
     # Shared for all projects
-    #$projectDir = $buildFor -replace 'openstack/'
     $projectDir = Split-Path -Path $project -Leaf
     Write-JujuLog "Installing $projectDir"
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
@@ -415,50 +337,39 @@ function Get-ComputeDriver {
     return "hyperv.driver.HyperVDriver"
 }
 
-function Install-NetworkType {
+
+function ConfigureNeutronAgent {
     $buildFor = Get-JujuCharmConfig -Scope 'zuul-project'
-    $networkType = Get-JujuCharmConfig -Scope 'network-type'
-    if (($networkType -eq 'ovs') -and ($buildFor -eq 'openstack/networking-hyperv')) {
-        Throw "'$networkType' cannot be used when building for '$buildFor'"
+    $driverCertificate = Get-JujuCharmConfig -Scope "ovs-certificate-url"
+    $CertificatePath = Get-OVSCertificate
+    $services = Get-CharmServices
+    $netType = Get-NetType
+
+    if (($netType -eq 'ovs') -and ($buildFor -eq 'openstack/networking-hyperv')) {
+        Throw "'$netType' cannot be used when building for '$buildFor'"
     }
-    if ($networkType -eq 'hyperv') {
-#        Install-NetworkingHyperV
-        Install-Projects "openstack/networking-hyperv"
+    
+    if($netType -eq "hyperv") {
+
+        Remove-CharmState -Namespace "hvcomputesrc" -Key "ovs_adapters_info"
+        Install-OpenstackProject "openstack/networking-hyperv"
+        ConfigureVMSwitch
+
     }
-    elseif ($networkType -eq 'ovs') {
-        Check-OVSPrerequisites
+    elseif($netType -eq "ovs") {
+        if ($driverCertificate) {
+            Import-OVSCertificate $CertificatePath
+        }
+        
+        Install-OVS
+
+        Disable-OVS
+        ConfigureVMSwitch
         Enable-OVS
-        Ensure-InternalOVSInterfaces
+
+        New-OVSInternalInterfaces
+        #Enable-Service $services["neutron-ovs"]["service"]
     }
-    else {
-        Throw "Wrong network type config: '$networkType'"
-    }
-}
-
-
-function Install-OVS {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$InstallerPath
-    )
-
-    Write-JujuInfo "Running OVS install"
-    $ovs_name = "open vswitch"
-    if (Get-ComponentIsInstalled -Name $ovs_name){
-        Write-JujuInfo "OVS is already installed"
-        return $true
-    }
-
-    if(!(Test-Path $InstallerPath)){
-        $InstallerPath = Get-OVSInstaller
-    }
-
-    Write-JujuInfo "Installing from $InstallerPath"
-    $logFile = Join-Path $env:APPDATA "ovs-installer-log.txt"
-    $extraParams = @("INSTALLDIR=`"$OVS_DIR`"")
-    Install-Msi -Installer $installerPath -LogFilePath $logFile -ExtraArgs $extraParams
-    Remove-Item $InstallerPath
-    return $true
 }
 
 
@@ -477,63 +388,10 @@ function Import-OVSCertificate {
 }
 
 
-function Get-OVSInstaller {
-    $ovsinstallerURL = Get-JujuCharmConfig -Scope 'ovs-installer-url'
-    $location = Get-PackagePath $ovsinstallerURL
-    return $location
-}
-
 function Get-OVSCertificate {
     $ovscertURL = Get-JujuCharmConfig -Scope 'ovs-certificate-url'
     $location = Get-PackagePath $ovscertURL
     return $location
-}
-
-function Check-OVSPrerequisites {
-    try {
-        $ovsdbSvc = Get-Service "ovsdb-server"
-        $ovsSwitchSvc = Get-Service "ovs-vswitchd"
-    } catch {
-        $driverCertificate = Get-JujuCharmConfig -Scope "ovs-certificate-url"
-        if ($driverCertificate) {
-            $CertificatePath = Get-OVSCertificate
-            Import-OVSCertificate $CertificatePath
-        }
-        else {
-            Write-JujuLog "No OVS driver certificate specified. Be sure to use an offically signed driver."
-        }
-        $InstallerPath = Get-OVSInstaller
-        Install-OVS $InstallerPath
-    }
-    if(!(Test-Path $OVS_VSCTL)){
-        Throw "Could not find ovs-vsctl.exe in location: $OVS_VSCTL"
-    }
-}
-
-
-function Enable-OVSExtension {
-    $ext = Get-OVSExtStatus
-    if (!$ext){
-       Throw "Cannot enable OVS extension. Not installed"
-    }
-    if (!$ext.Enabled) {
-        Enable-VMSwitchExtension $OVS_EXT_NAME $ext.SwitchName
-    }
-    return $true
-}
-
-
-function Get-OVSExtStatus {
-    $br = Get-JujuVMSwitchName
-    Write-JujuInfo "Switch name is $br"
-    $ext = Get-VMSwitchExtension -VMSwitchName $br -Name $OVS_EXT_NAME
-
-    if (!$ext){
-        Write-JujuInfo "Open vSwitch extension not installed"
-        return $null
-    }
-
-    return $ext
 }
 
 
@@ -547,46 +405,20 @@ function Enable-Service {
 }
 
 
-function Set-HyperVMACS {
-    $b1 = "0x{0:x}" -f (get-random -minimum 1 -maximum 255)
-    $b2 = "0x{0:x}" -f (get-random -minimum 1 -maximum 255)
-    $reg = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Virtualization"
-    set-ItemProperty -path $reg -name minimummacaddress -type binary -value ([byte[]](0x00,0x15,0x5d,$b1,$b2,0x00))
-    set-ItemProperty -path $reg -name maximummacaddress -type binary -value ([byte[]](0x00,0x15,0x5d,$b1,$b2,0xff))
-}
+function Set-HyperVUniqueMACAddressesPool {
+    $registryNamespace = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Virtualization"
 
+    $randomBytes = @(
+        [byte](Get-Random -Minimum 0 -Maximum 255),
+        [byte](Get-Random -Minimum 0 -Maximum 255)
+    )
 
-function Enable-OVS {
-    Start-ExternalCommand { pip install -U "ovs" } -ErrorMessage "Failed to install $ovs_pip"
-    
-    Start-ExternalCommand { cmd.exe /c "sc triggerinfo ovs-vswitchd start/strcustom/6066F867-7CA1-4418-85FD-36E3F9C0600C/VmmsWmiEventProvider" } -ErrorMessage "Failed to modify ovs-vswitchd service."
-    Start-ExternalCommand { cmd.exe /c "sc config ovs-vswitchd start=demand" } -ErrorMessage "Failed to modify ovs-vswitchd service."
+    # Generate unique pool of MAC addresses
+    $minMacAddress = @(0x00, 0x15, 0x5D, $randomBytes[0], $randomBytes[1], 0x00)
+    Set-ItemProperty -Path $registryNamespace -Name "MinimumMacAddress" -Value ([byte[]]$minMacAddress)
 
-    Enable-OVSExtension
-
-    Enable-Service "ovsdb-server"
-    #Enable-Service "ovs-vswitchd"
-
-    Start-Service "ovsdb-server"
-    #Start-Service "ovs-vswitchd"
-}
-
-
-function Ensure-InternalOVSInterfaces {
-    $ifIndex = Get-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex"
-    $lip = Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip"
-    $ifName = (Get-NetAdapter -ifindex $ifIndex).Name
-    $lip_mask = Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip_mask"
-
-    Invoke-JujuCommand -Command @($ovs_vsctl, "--may-exist", "add-br", "juju-br")
-    Invoke-JujuCommand -Command @($ovs_vsctl, "--may-exist", "add-port", "juju-br", $ifName)
-
-    Restart-Service "ovs-vswitchd"
-    Enable-NetAdapter -Name "juju-br" -Confirm:$false
-
-    New-NetIPAddress -interfacealias "juju-br" -AddressFamily "ipv4" -IPAddress $lip -PrefixLength $lip_mask
-    Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip" -Value $lip
-    return
+    $maxMacAddress = @(0x00, 0x15, 0x5D, $randomBytes[0], $randomBytes[1], 0xff)
+    Set-ItemProperty -Path $registryNamespace -Name "MaximumMacAddress" -Value ([byte[]]$maxMacAddress)
 }
  
 
@@ -719,18 +551,18 @@ function Initialize-Environment {
     if ($buildFor -in $standardProjects) {
         $defaultProjects = $standardProjects -notmatch $buildFor
         foreach ($project in $defaultProjects) {
-            Install-Projects $project
+            Install-OpenstackProject $project
         }
-        Install-NetworkType
-        Install-Projects $buildFor
+        ConfigureNeutronAgent
+        Install-OpenstackProject $buildFor
     }
     else {
         foreach ($project in $standardProjects) {
-            Install-Projects $project
+            Install-OpenstackProject $project
         }
-        Install-NetworkType
+        ConfigureNeutronAgent
         if (($buildFor -ne "none") -and ($buildFor -ne "openstack/networking-hyperv")) {
-            Install-Projects $buildFor
+            Install-OpenstackProject $buildFor
         }
     }
 
@@ -791,200 +623,75 @@ function Watch-ServiceStatus {
 }
 
 
-function Get-JujuVMSwitchName {
-    $VMswitchName = Get-JujuCharmConfig -Scope "vmswitch-name"
-    if (!$VMswitchName){
-        return "br100"
-    }
-    return $VMswitchName
-}
+function Get-DataPorts {
+    $netType = Get-NetType
 
+    if ($netType -eq "ovs") {
+        Write-JujuWarning "Fetching OVS data ports"
 
-function Get-InterfaceFromConfig {
-    Param (
-        [string]$ConfigOption="data-port",
-        [switch]$MustFindAdapter=$false
-    )
-
-    $nic = $null
-    $DataInterfaceFromConfig = Get-JujuCharmConfig -Scope $ConfigOption
-    Write-JujuInfo "Looking for $DataInterfaceFromConfig"
-    if (!$DataInterfaceFromConfig){
-        if($MustFindAdapter) {
-            Throw "No data-port was specified"
-        }
-        return $null
-    }
-    $byMac = @()
-    $byName = @()
-    $macregex = "^([a-f-A-F0-9]{2}:){5}([a-fA-F0-9]{2})$"
-    foreach ($i in $DataInterfaceFromConfig.Split()){
-        if ($i -match $macregex){
-            $byMac += $i.Replace(":", "-")
-        }else{
-            $byName += $i
-        }
-    }
-    if ($byMac.Length){
-        $nicByMac = Get-NetAdapter | Where-Object { $_.MacAddress -in $byMac -and $_.DriverFileName -ne "vmswitch.sys" }
-    }
-    if ($byName.Length){
-        $nicByName = Get-NetAdapter | Where-Object { $_.Name -in $byName }
-    }
-    if ($nicByMac -ne $null -and $nicByMac.GetType() -ne [System.Array]){
-        $nicByMac = @($nicByMac)
-    }
-    if ($nicByName -ne $null -and $nicByName.GetType() -ne [System.Array]){
-        $nicByName = @($nicByName)
-    }
-    $ret = $nicByMac + $nicByName
-    if ($ret.Length -eq 0 -and $MustFindAdapter){
-        Throw "Could not find network adapters"
-    }
-    return $ret
-}
-
-
-function Get-DataPortFromDataNetwork {
-    $dataNetwork = Get-JujuCharmConfig -Scope "os-data-network"
-    if (!$dataNetwork) {
-        Write-JujuInfo "os-data-network is not defined"
-        return $false
+        $dataPorts = Get-OVSDataPorts
+        return @($dataPorts, $false)
     }
 
-    $local_ip = Get-CharmState -Namespace "hvcomputesrc" -Key "local_ip"
-    $ifIndex = Get-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex"
+    $cfg = Get-JujuCharmConfig
+    $managementOS = $cfg['vmswitch-management']
 
-    if($local_ip -and $ifIndex){
-        if((Confirm-LocalIP -IPaddress $ifIndex -ifIndex $ifIndex)){
-            return Get-NetAdapter -ifindex $ifIndex
-        }
-    }
+    Write-JujuWarning "Fetching data port from config"
 
-    # If there is any network interface configured to use DHCP and did not get an IP address
-    # we manually renew its lease and try to get an IP address before searching for the data network
-    $interfaces = Get-CimInstance -Class win32_networkadapterconfiguration | Where-Object { 
-        $_.IPEnabled -eq $true -and $_.DHCPEnabled -eq $true -and $_.DHCPServer -eq "255.255.255.255"
-    }
-    if($interfaces){
-        $interfaces.InterfaceIndex | Invoke-DHCPRenew -ErrorAction SilentlyContinue
-    }
-    $netDetails = $dataNetwork.Split("/")
-    $decimalMask = ConvertTo-Mask $netDetails[1]
-
-    $configuredAddresses = Get-NetIPAddress -AddressFamily IPv4
-    foreach ($i in $configuredAddresses) {
-        Write-JujuInfo ("Checking {0} on interface {1}" -f @($i.IPAddress, $i.InterfaceAlias))
-        if ($i.PrefixLength -ne $netDetails[1]){
-            continue
-        }
-        $network = Get-NetworkAddress $i.IPv4Address $decimalMask
-        Write-JujuInfo ("Network address for {0} is {1}" -f @($i.IPAddress, $network))
-        if ($network -eq $netDetails[0]){
-            Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip_mask" -Value $i.PrefixLength
-            Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip" -Value $i.IPAddress
-            Set-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex" -Value $i.IfIndex
-            return Get-NetAdapter -ifindex $i.IfIndex
-        }
-    }
-    return $false
-}
-
-
-function Get-RealInterface {
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [Microsoft.Management.Infrastructure.CimInstance]$interface
-    )
-    PROCESS {
-        if($interface.DriverFileName -ne "vmswitch.sys") {
-            return $interface
-        }
-        $realInterface = Get-NetAdapter | Where-Object {
-            $_.MacAddress -eq $interface.MacAddress -and $_.ifIndex -ne $interface.ifIndex
-        }
-
-        if(!$realInterface){
-            Throw "Failed to find interface attached to VMSwitch"
-        }
-        return $realInterface[0]
-    }
-}
-
-
-function Get-FallbackNetadapter {
-    $name = Get-MainNetadapter
-    $net = Get-NetAdapter -Name $name
-    return $net
-}
-
-
-function Get-OVSDataPort {
-    $dataPort = Get-DataPortFromDataNetwork
-    if ($dataPort){
-        return Get-RealInterface $dataPort
-    }else{
-        $port = Get-FallbackNetadapter
-        $local_ip = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $port.IfIndex -ErrorAction SilentlyContinue
-        if(!$local_ip){
-            Throw "failed to get fallback adapter IP address"
-        }
-        Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip_mask" -Value $i.PrefixLength
-        Set-CharmState -Namespace "hvcomputesrc" -Key "local_ip" -Value $local_ip[0]
-        Set-CharmState -Namespace "hvcomputesrc" -Key "dataNetworkIfindex" -Value $port.IfIndex
-    }
-
-    return Get-RealInterface $port
-}
-
-
-function Get-DataPort {
-    $managementOS = Get-JujuCharmConfig -Scope "vmswitch-management"
-    $networkType = Get-JujuCharmConfig -Scope 'network-type'
-
-    if ($networkType -eq "ovs"){
-        Write-JujuInfo "Trying to fetch OVS data port"
-        $dataPort = Get-OVSDataPort
-        return @($dataPort[0], $managementOS)
-    }
-
-    Write-JujuInfo "Trying to fetch data port from config"
-    $nic = Get-InterfaceFromConfig
-    if(!$nic) {
-        $nic = Get-FallbackNetadapter
+    $dataPorts = Get-InterfaceFromConfig
+    if (!$dataPorts) {
+        $fallbackAdapter = Get-FallbackNetadapter
+        $dataPorts = @($fallbackAdapter)
         $managementOS = $true
     }
-    $nic = Get-RealInterface $nic[0]
-    return @($nic, $managementOS)
+
+    return @($dataPorts, $managementOS)
 }
 
 
 function ConfigureVMSwitch {
-    $VMswitchName = Get-JujuVMSwitchName
-    $vmswitch = Get-VMSwitch -SwitchType External -Name $VMswitchName -ErrorAction SilentlyContinue
+    $cfg = Get-JujuCharmConfig
+    $vmSwitchName = Get-VMSwitchName
 
-    if($vmswitch){
-        return $true
-    }
+    [array]$dataPorts, $managementOS = Get-DataPorts
+    $dataPort = $dataPorts[0]
 
-    Set-HyperVMACS
+    $vmSwitches = [array](Get-VMSwitch -SwitchType External -ErrorAction SilentlyContinue)
+    foreach ($i in $vmSwitches) {
+        if ($i.NetAdapterInterfaceDescription -eq $dataPort.InterfaceDescription) {
+            $agentRestart = $false
 
-    $dataPort, $managementOS = Get-DataPort
-    $VMswitches = Get-VMSwitch -SwitchType External -ErrorAction SilentlyContinue
-    if ($VMswitches -and $VMswitches.Count -gt 0){
-        foreach($i in $VMswitches){
-            if ($i.NetAdapterInterfaceDescription -eq $dataPort.InterfaceDescription) {
-                Rename-VMSwitch $i -NewName $VMswitchName
-                Set-VMSwitch -Name $VMswitchName -AllowManagementOS $managementOS
-                return $true
+            if($i.Name -ne $vmSwitchName) {
+                $agentRestart = $true
+                Rename-VMSwitch $i -NewName $vmSwitchName | Out-Null
             }
+
+            if($i.AllowManagementOS -ne $managementOS) {
+                $agentRestart = $true
+                Set-VMSwitch -Name $vmSwitchName -AllowManagementOS $managementOS | Out-Null
+            }
+
+            if($agentRestart) {
+                $netType = Get-NetType
+                if($netType -eq "ovs") {
+                    $status = (Get-Service -Name "ovs-vswitchd").Status
+                    if($status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+                        Restart-Service "ovs-vswitchd" | Out-Null
+                    }
+                }
+            }
+            return
         }
     }
 
-    Write-JujuInfo "Adding new vmswitch: $VMswitchName"
-    New-VMSwitch -Name $VMswitchName -NetAdapterName $dataPort.Name -AllowManagementOS $managementOS
-    return $true
+    if($vmSwitches) {
+        # We might have old switches created by the charm and we reach this code because
+        # 'data-port' and 'vmswitch-name' changed. We just delete the old switches.
+        $vmSwitches | Remove-VMSwitch -Force -Confirm:$false
+    }
+
+    Write-JujuWarning "Adding new vmswitch: $vmSwitchName"
+    New-VMSwitch -Name $vmSwitchName -NetAdapterName $dataPort.Name -AllowManagementOS $managementOS | Out-Null
 }
 
 
@@ -1152,39 +859,18 @@ function Get-HypervADUser {
 }
 
 
-function Set-DevStackRelationParams {
-    Param(
-        [HashTable]$RelationParams
-    )
-
-    $rids = Get-JujuRelationIds -Relation "devstack"
-    foreach ($rid in $rids) {
-        try {
-            Set-JujuRelation -Settings $RelationParams -RelationId $rid
-        } catch {
-            Write-JujuError "Failed to set DevStack relation parameters."
-        }
-    }
-}
-
-
-function Import-CloudbaseCert {
-    $crt = Join-Path $FILES_DIR "Cloudbase_signing.cer"
-    if (!(Test-Path $crt)){
-        return $false
-    }
-    Import-Certificate $crt -StoreLocation LocalMachine -StoreName TrustedPublisher
-}
-
-
 function Set-AD2DevstackCreds {
+    $adCtx = Get-ActiveDirectoryContext
     $adUserCred = @{
         'domain'   = $adCtx["domainName"];
         'username' = $adCtx['adcredentials'][0]['username'];
         'password' = $adCtx['adcredentials'][0]['password']
     }
     $relationParams = @{'ad_credentials' = (Get-MarshaledObject $adUserCred);}
-    Set-DevStackRelationParams $relationParams
+    $rids = Get-JujuRelationIds -Relation "devstack"
+    foreach ($rid in $rids) {
+        Set-JujuRelation -Settings $RelationParams -RelationId $rid
+    }
 }
 
 
@@ -1192,10 +878,8 @@ function Join-ADDomain {
     $adCtx = Get-ActiveDirectoryContext
     if (Confirm-IsInDomain $adCtx["domainName"]) {
         # Add AD user to local Administrators group
-            Start-ExecuteWithRetry {
-                Grant-PrivilegesOnDomainUser -Username $adCtx['adcredentials'][0]['username']
-            }
-            Enable-LiveMigration
+        Grant-PrivilegesOnDomainUser -Username $adCtx['adcredentials'][0]['username']
+        Enable-LiveMigration
     }
     else {
         Start-JoinDomain
@@ -1220,9 +904,60 @@ function Enable-LiveMigration {
 }
 
 
-# HOOKS FUNCTIONS
+function Set-HypervServiceStatus {
+     <#
+    .SYNOPSIS
+    Returns a boolean to indicate if a reboot is needed or not
+    #>
 
-function Invoke-InstallHook {
+    if (Get-IsNanoServer) {
+        return $false
+    }
+    $rebootNeeded = $false
+    try {
+        $needsHyperV = Get-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V'
+    } catch {
+        Throw "Failed to get Hyper-V role status: $_"
+    }
+    if ($needsHyperV.State -ne "Enabled") {
+        $installHyperV = Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V' -All -NoRestart
+        if ($installHyperV.RestartNeeded) {
+            $rebootNeeded = $true
+        }
+    } else {
+        if ($needsHyperV.RestartNeeded) {
+            $rebootNeeded = $true
+        }
+    }
+    $stat = Enable-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-Management-PowerShell' -All -NoRestart
+    if ($stat.RestartNeeded) {
+        $rebootNeeded = $true
+    }
+    return $rebootNeeded
+}
+
+
+function Set-BCDEditStatus {
+    <#
+    .SYNOPSIS
+    Returns a boolean to indicate if a reboot is needed or not
+    #>
+    
+    $bcdReboot = $false
+    # Allow self-signed drivers installation
+    $bcdedit = Join-Path $env:SystemDrive "bcdedit.txt"
+    $signingStatus = Get-JujuCharmConfig -Scope "test-signing"
+    if ((!(Test-Path -path $bcdedit)) -and ($signingStatus)){
+        bcdedit -set loadoptions DDISABLE_INTEGRITY_CHECKS
+        bcdedit -set TESTSIGNING ON
+        New-Item -ItemType file $bcdedit
+        $bcdReboot = $true
+    }
+    return $bcdReboot
+}
+
+
+function ConfigureWindows {
     # Set machine to use high performance settings.
     try {
         Set-PowerProfile -PowerProfile Performance
@@ -1231,46 +966,39 @@ function Invoke-InstallHook {
         Write-JujuWarning "Failed to set power scheme."
     }
 
-    Start-TimeResync
-
     # Set Administrator user password
-    $admin_user = "Administrator"
+    $admin_user = Get-AdministratorAccount
     $admin_password = Get-JujuCharmConfig -Scope 'administrator-password'
+    if (!$admin_password) {
+        $admin_password = "Passw0rd"
+    }
     net user $admin_user "$admin_password"
     
-    # Install Hyperv feature if not present
-    if (!(Get-WindowsFeature hyper-v).Installed) {
-        Install-WindowsFeature -Name Hyper-V -includemanagementtools
-        #Invoke-JujuReboot -Now
-    }
-    
-    # Allow self-signed drivers installation
-    $bcdedit = "C:\bcdedit.txt"
-    $signingStatus = Get-JujuCharmConfig -Scope "test-signing"
-    if ((!(Test-Path -path $bcdedit)) -and ($signingStatus)){
-        bcdedit -set loadoptions DDISABLE_INTEGRITY_CHECKS
-        bcdedit -set TESTSIGNING ON
-        New-Item -ItemType file $bcdedit
-        Write-JujuLog "Restarting in order to enable test signing."
-        Invoke-JujuReboot -Now
-    }
-    
-
     # Disable firewall
     Start-ExternalCommand { netsh.exe advfirewall set allprofiles state off } -ErrorMessage "Failed to disable firewall."
+    
     # Disable automatic updates
     Write-JujuLog "Disabling automatic updates"
     $update_service = Get-WmiObject Win32_Service -Filter 'Name="wuauserv"'
     $update_service.ChangeStartMode("Disabled")
     $update_service.StopService()
+}
 
-    
-    Write-JujuLog "Enable and start MSiSCSI"
-    $msiscsi_service = Get-WmiObject Win32_Service -Filter 'Name="MSiSCSI"'
-    $msiscsi_service.ChangeStartMode("Automatic")
-    $msiscsi_service.StartService()
 
-    ConfigureVMSwitch
+function Enable-MSiSCSI {
+    Write-JujuWarning "Enabling MSiSCSI"
+    $svc = Get-Service "MSiSCSI" -ErrorAction SilentlyContinue
+    if ($svc) {
+        Start-Service "MSiSCSI"
+        Set-Service "MSiSCSI" -StartupType Automatic
+    } else {
+        Write-JujuWarning "MSiSCSI service was not found"
+    }
+}
+
+
+function Install-Prerequisites {
+    # Write the pip config file.
     Write-PipConfigFile
 
     # Install Git
@@ -1300,33 +1028,67 @@ function Invoke-InstallHook {
 
     # Install pip pywin32
     Install-PyWin32
+}
+
+
+# HOOKS FUNCTIONS
+
+function Invoke-InstallHook {
+    Start-TimeResync
     
+    # Hyperv Service
+    $hypervReboot = Set-HypervServiceStatus
+    
+    # Allow self signed drivers status
+    $bcdReboot = Set-BCDEdit`Status
+    
+    if ($hypervReboot -or $bcdReboot) {
+        Invoke-JujuReboot -Now
+    }
+    
+    ConfigureWindows
+    
+    Enable-MSiSCSI
+
+    Install-Prerequisites
+    
+    Set-HyperVUniqueMACAddressesPool
+    
+    # Set the git email and user here
+    $gitEmail = Get-JujuCharmConfig -scope 'git-user-email'
+    $gitName = Get-JujuCharmConfig -scope 'git-user-name'
+    Start-ExternalCommand { git config --global user.email $gitEmail } `
+                          -ErrorMessage "Failed to set git global user.email"
+    Start-ExternalCommand { git config --global user.name $gitName } `
+                          -ErrorMessage "Failed to set git global user.name"
+    
+    # Get Zuul variables from juju config if they exist
     $zuulUrl = Get-JujuCharmConfig -Scope 'zuul-url'
     $zuulRef = Get-JujuCharmConfig -Scope 'zuul-ref'
     $zuulChange = Get-JujuCharmConfig -Scope 'zuul-change'
     $zuulProject = Get-JujuCharmConfig -Scope 'zuul-project'
 
+    # If zuulProject is empty will be set to 'none' value here so there is no chance
+    # it will be imported in other functions as a different value if set to null.
     if (!$zuulProject) {
         Write-JujuLog "zuulProject is empty. Setting it to 'none'. Not running Git Prep"
         $zuulProject = "none"
     }
     else {
         GerritGitPrep -ZuulUrl $zuulUrl -ZuulRef $zuulRef `
-                            -ZuulChange $zuulChange -ZuulProject $zuulProject
+                      -ZuulChange $zuulChange -ZuulProject $zuulProject
     }
     
-    $gitEmail = Get-JujuCharmConfig -scope 'git-user-email'
-    $gitName = Get-JujuCharmConfig -scope 'git-user-name'
-    Start-ExternalCommand { git config --global user.email $gitEmail } `
-        -ErrorMessage "Failed to set git global user.email"
-    Start-ExternalCommand { git config --global user.name $gitName } `
-        -ErrorMessage "Failed to set git global user.name"
+    # Even though zuulBranch should still be set in juju config even if
+    # we are not prepping any project, this is a failsafe in case no value
+    # is set, falling back to 'master' branch.
     $zuulBranch = Get-JujuCharmConfig -scope 'zuul-branch'
     if (!$zuulBranch) {
         Write-JujuLog "zuulBranch is empty. Setting branch to master"
         $zuulBranch = "master"
     }
 
+    # Initialize the environment
     Write-JujuLog "Initializing the environment"
     Initialize-Environment -BranchName $zuulBranch -BuildFor $zuulProject
 }
@@ -1345,18 +1107,14 @@ function Invoke-ADRelationJoinedHook {
 
     $rids = Get-JujuRelationIds -Relation "ad-join"
     foreach ($rid in $rids) {
-        try {
-            Set-JujuRelation -Settings $relationParams -RelationId $rid
-        } catch {
-            Write-JujuError "Failed to set AD relation parameters."
-        }
+        Set-JujuRelation -Settings $relationParams -RelationId $rid
     }
 }
 
 
 function Invoke-RelationHooks {
     $charmServices = Get-CharmServices
-    $networkType = Get-JujuCharmConfig -Scope 'network-type'
+    $networkType = Get-NetType
     if ($networkType -eq "hyperv") {
         $charmServices.Remove('neutron-ovs')
     } elseif ($networkType -eq "ovs") {
@@ -1395,14 +1153,15 @@ function Invoke-RelationHooks {
         # Create services and write configs.
         foreach($key in $charmServices.Keys) {
             New-OpenStackService $charmServices[$key]['service_name'] $charmServices[$key]['description'] `
-                                $charmServices[$key]['binary'] $charmServices[$key]['config'] `
-                                $adCtx['adcredentials'][0]['username'] `
-                                $adCtx['adcredentials'][0]['password']
-            Write-ConfigFile $key
+                                 $charmServices[$key]['binary'] $charmServices[$key]['config'] `
+                                 $adCtx['adcredentials'][0]['username'] `
+                                 $adCtx['adcredentials'][0]['password']
+            New-ConfigFile -ContextGenerators $charmServices[$key]['context_generators'] `
+						   -Template $charmServices[$key]['template'] `
+						   -OutFile $charmServices[$key]['config']
         }
     
         # Start Openstack Services
-        Start-Service "MSiSCSI"
         Write-JujuLog "Starting OpenStack services"
         $pollingInterval = 60
         foreach($key in $charmServices.Keys) {
