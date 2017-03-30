@@ -221,7 +221,8 @@ function Get-OVSExtStatus {
         return $null
     }
 
-    $ext = Get-VMSwitchExtension -VMSwitchName $vmSwitch.Name -Name $OVS_EXT_NAME
+    #$ext = Get-VMSwitchExtension -VMSwitchName $vmSwitch.Name -Name $OVS_EXT_NAME
+    $ext = Get-VMSwitchExtension -VMSwitchName $vmSwitch.Name | Where-Object { $_.Name -match "$OVS_EXT_NAME" }
     if (!$ext){
         Write-JujuWarning "Open vSwitch extension not installed"
         return $null
@@ -238,7 +239,8 @@ function Enable-OVSExtension {
     }
 
     if (!$ext.Enabled) {
-        Enable-VMSwitchExtension $OVS_EXT_NAME $ext.SwitchName | Out-Null
+        #Enable-VMSwitchExtension $OVS_EXT_NAME $ext.SwitchName | Out-Null
+        Enable-VMSwitchExtension -VMSwitchExtension $ext | Out-Null
     }
 }
 
@@ -246,7 +248,8 @@ function Disable-OVSExtension {
     $ext = Get-OVSExtStatus
 
     if ($ext -and $ext.Enabled) {
-        Disable-VMSwitchExtension $OVS_EXT_NAME $ext.SwitchName | Out-Null
+        #Disable-VMSwitchExtension $OVS_EXT_NAME $ext.SwitchName | Out-Null
+        Disable-VMSwitchExtension -VMSwitchExtension $ext | Out-Null
     }
 }
 

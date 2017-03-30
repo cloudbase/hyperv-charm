@@ -92,6 +92,10 @@ options:
     default: ""
     type: string
     description: "Extra python packages to install."
+  post-python-packages:
+    default: ""
+    type: string
+    description: "Install or force python package version after all services are installed"
   administrator-password:
     default: ""
     type: string

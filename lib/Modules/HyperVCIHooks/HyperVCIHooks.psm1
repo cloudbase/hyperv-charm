@@ -31,10 +31,10 @@ function Get-SystemContext {
         "mkisofs_exe"         = $MKISO_EXE;
         "log_directory"       = $LOG_DIR;
         "qemu_img_exe"        = $QEMU_IMG_EXE;
-        "compute_driver"      = Get-ComputeDriver
-        "vswitch_name"        = Get-VMSwitchName
-        "local_ip"            = Get-JujuUnitPrivateIP;
-        "cores_count"         = (Get-WmiObject -Class Win32_ComputerSystem | select -ExpandProperty "NumberOfLogicalProcessors")
+        "compute_driver"      = Get-ComputeDriver;
+        "vswitch_name"        = Get-VMSwitchName;
+        "local_ip"            = Get-NetTypeLocalIP;
+        "cores_count"         = (Get-WmiObject -Class Win32_ComputerSystem | select -ExpandProperty "NumberOfLogicalProcessors");
         "etc_directory"       = $CONFIG_DIR;
         "bin_directory"       = $BIN_DIR;
     }
@@ -338,10 +338,20 @@ function Get-ComputeDriver {
 }
 
 
+function Get-NetTypeLocalIP {
+    $netType = Get-NetType
+    $local_ip = Get-JujuUnitPrivateIP
+    if ($netType -eq "ovs") {
+        $local_ip = Get-OVSLocalIP
+    }
+    Write-JujuLog "Network type is $netType. Using $local_ip for system context"
+    return $local_ip
+}
+
+
 function ConfigureNeutronAgent {
     $buildFor = Get-JujuCharmConfig -Scope 'zuul-project'
     $driverCertificate = Get-JujuCharmConfig -Scope "ovs-certificate-url"
-    $CertificatePath = Get-OVSCertificate
     $services = Get-CharmServices
     $netType = Get-NetType
 
@@ -358,6 +368,7 @@ function ConfigureNeutronAgent {
     }
     elseif($netType -eq "ovs") {
         if ($driverCertificate) {
+            $CertificatePath = Get-OVSCertificate
             Import-OVSCertificate $CertificatePath
         }
         
@@ -483,7 +494,7 @@ function Initialize-GitRepository {
             Write-JujuWarning ("Cherry-pick for {0} failed. Reverting to the previous state.Error: $_" -f
                               @($commit['branch_ref']))
             Start-ExternalCommand -ScriptBlock {
-                git cherry-pick --abort
+                git -C $BuildFolder cherry-pick --abort
             }
         }
     }
@@ -565,7 +576,10 @@ function Initialize-Environment {
             Install-OpenstackProject $buildFor
         }
     }
-
+    
+    # Force certain python packages version if needed.
+    Install-PostPackages
+    
     Write-JujuLog "Environment initialization done."
 }
 
@@ -651,7 +665,10 @@ function Get-DataPorts {
 
 function ConfigureVMSwitch {
     $cfg = Get-JujuCharmConfig
-    $vmSwitchName = Get-VMSwitchName
+    $vmSwitchName = $cfg['vmswitch-name']
+    if (!$vmSwitchName) {
+        $vmSwitchName = $NOVA_DEFAULT_SWITCH_NAME
+    }
 
     [array]$dataPorts, $managementOS = Get-DataPorts
     $dataPort = $dataPorts[0]
@@ -674,9 +691,9 @@ function ConfigureVMSwitch {
             if($agentRestart) {
                 $netType = Get-NetType
                 if($netType -eq "ovs") {
-                    $status = (Get-Service -Name "ovs-vswitchd").Status
+                    $status = (Get-Service -Name $OVS_VSWITCHD_SERVICE_NAME).Status
                     if($status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                        Restart-Service "ovs-vswitchd" | Out-Null
+                        Restart-Service $OVS_VSWITCHD_SERVICE_NAME | Out-Null
                     }
                 }
             }
@@ -762,10 +779,24 @@ function Install-PipDependencies {
         $pythonPkgsArr = $pythonPkgs.Split()
         Set-Content -Path $pkgsTXT -Value $pythonPkgsArr
         Write-JujuLog "Installing $pythonPkgsArr"
-        Start-ExternalCommand -ScriptBlock { pip install -r $pkgsTXT } `
+        Start-ExternalCommand -ScriptBlock { pip install -U -r $pkgsTXT } `
                                 -ErrorMessage "Failed to install extra python packages"
         Remove-Item -Force -Path $pkgsTXT
     }
+}
+
+
+function Install-PostPackages {
+   $postpythonPkgs = Get-JujuCharmConfig -Scope 'post-python-packages'
+   if ($postpythonPkgs) {
+        $postpkgsTXT = Join-Path $env:TEMP 'postpypkg.txt'
+        $postpythonPkgsArr = $postpythonPkgs.Split()
+        Set-Content -Path $postpkgsTXT -Value $postpythonPkgsArr
+        Write-JujuLog "Installing $postpythonPkgsArr"
+        Start-ExternalCommand -ScriptBlock { pip install -U -r $postpkgsTXT } `
+                                -ErrorMessage "Failed to install post python packages"
+        Remove-Item -Force -Path $postpkgsTXT
+   }
 }
 
 
@@ -1040,7 +1071,7 @@ function Invoke-InstallHook {
     $hypervReboot = Set-HypervServiceStatus
     
     # Allow self signed drivers status
-    $bcdReboot = Set-BCDEdit`Status
+    $bcdReboot = Set-BCDEditStatus
     
     if ($hypervReboot -or $bcdReboot) {
         Invoke-JujuReboot -Now
