@@ -24,6 +24,7 @@ $COMPUTERNAME = [System.Net.Dns]::GetHostName()
 $SUPPORTED_OPENSTACK_RELEASES = @('liberty', 'mitaka', 'newton')
 
 # Git Repositories
+$REQUIREMENTS_GIT       = "https://github.com/openstack/requirements.git"
 $NEUTRON_GIT           = "https://github.com/openstack/neutron.git"
 $NOVA_GIT              = "https://github.com/openstack/nova.git"
 $NETWORKING_HYPERV_GIT = "https://github.com/openstack/networking-hyperv.git"

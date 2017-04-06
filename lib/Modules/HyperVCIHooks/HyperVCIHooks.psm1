@@ -271,9 +271,38 @@ function Install-OpenStackProjectFromRepo {
     Param(
         [string]$ProjectPath
     )
-
-    Start-ExternalCommand -ScriptBlock { pip install -e $ProjectPath } `
-                          -ErrorMessage "Failed to install $ProjectPath from repo."
+    $BranchName = Get-JujuCharmConfig -scope 'zuul-branch'
+    $openstackBuild = Join-Path $BUILD_DIR "openstack"
+    $ProjectName = Split-Path -Path $ProjectPath -Leaf
+    if ( $ProjectName -eq "requirements" ) {
+        Start-ExternalCommand -ScriptBlock { pip install -c $ProjectPath\upper-constraints.txt -U $ProjectPath } `
+                              -ErrorMessage "Failed to install $ProjectPath from repo."
+    }
+    if (( $ProjectName -eq "nova" ) -or ( $ProjectName -eq "neutron" )) {
+        Start-ExternalCommand -ScriptBlock {
+            update-requirements.exe --source $openstackBuild\requirements $ProjectPath
+            pip install -c $openstackBuild\requirements\upper-constraints.txt -U $ProjectPath
+        } -ErrorMessage "Either update-requirements or install has failed for $ProjectPath"
+    }
+    if (( $ProjectName -eq "networking-hyperv" ) -or ( $ProjectName -eq "compute-hyperv" )) {
+        Start-ExternalCommand -ScriptBlock { update-requirements.exe --source $openstackBuild\requirements $ProjectPath } `
+                              -ErrorMessage "Failed to update requirements for $ProjectPath ."
+        if (( $BranchName -eq "stable/liberty" ) -or ( $BranchName -eq "stable/mitaka" )) {
+            Start-ExternalCommand -ScriptBlock { pip install -c $openstackBuild\requirements\upper-constraints.txt -U $ProjectPath } `
+                                  -ErrorMessage "Failed to install $ProjectPath from repo."
+        }
+        else {
+            Start-ExternalCommand -ScriptBlock { pip install -e $ProjectPath } `
+                                  -ErrorMessage "Failed to install $ProjectPath from repo."
+        }
+    }
+    if ( $ProjectName -eq "os-win" ) {
+        Start-ExternalCommand -ScriptBlock {
+            update-requirements.exe --source $openstackBuild\requirements $ProjectPath
+            edit-constraints.exe $openstackBuild\requirements\upper-constraints.txt -- os-win ""
+            pip install -c $openstackBuild\requirements\upper-constraints.txt -U $ProjectPath
+        } -ErrorMessage "Either update-requirements, edit-constraints or install has failed for $ProjectPath"
+    }
 }
 
 
@@ -515,7 +544,7 @@ function Initialize-GitRepositories {
     $openstackBuild = Join-Path $BUILD_DIR "openstack"
     if ($NetworkType -eq 'hyperv') {
         if ($BuildFor -ne "openstack/networking-hyperv") {
-                Initialize-GitRepository "$openstackBuild\networking-hyperv" $NETWORKING_HYPERV_GIT "master" $cherryPicks['networking-hyperv']
+                Initialize-GitRepository "$openstackBuild\networking-hyperv" $NETWORKING_HYPERV_GIT $BranchName $cherryPicks['networking-hyperv']
         }
     }
 
@@ -528,8 +557,10 @@ function Initialize-GitRepositories {
     }
     
     if ($BuildFor -ne "openstack/os-win") {
-            Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT "master" $cherryPicks['os-win']
+            Initialize-GitRepository "$openstackBuild\os-win" $OSWIN_GIT $BranchName $cherryPicks['os-win']
     }
+    
+    Initialize-GitRepository "$openstackBuild\requirements" $REQUIREMENTS_GIT $BranchName $cherryPicks['requirements']
 }
 
 
@@ -557,6 +588,9 @@ function Initialize-Environment {
   
     $networkType = Get-JujuCharmConfig -Scope 'network-type'
     Initialize-GitRepositories $networkType $BranchName $BuildFor
+
+    # Openstack requirements project is shared for all projects so we install it first no matter what
+    Install-OpenstackProject "openstack/requirements"
 
     $standardProjects = 'openstack/nova', 'openstack/neutron', 'openstack/os-win'
     if ($buildFor -in $standardProjects) {
